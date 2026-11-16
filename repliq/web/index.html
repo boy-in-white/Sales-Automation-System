@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="referrer" content="same-origin">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repliq · Підключення OLX</title>
+  <style>
+    :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172f32;background:#f3f5f2;font-size:15px;line-height:1.5}
+    *{box-sizing:border-box}body{margin:0}header{max-width:1140px;margin:auto;padding:28px 30px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+    .brand{font-size:27px;font-weight:780;letter-spacing:-1px}.brand span{color:#558565}.tag{font-size:12px;background:#e4ebe5;border:1px solid #d5dfd6;border-radius:30px;padding:6px 12px;color:#49634f}
+    main{max-width:1140px;margin:20px auto 60px;padding:0 30px}.eyebrow{font-size:11px;letter-spacing:2px;font-weight:700;color:#63806c;margin:0 0 10px}
+    h1{font-size:clamp(30px,4vw,45px);letter-spacing:-1.7px;line-height:1.12;max-width:710px;margin:0 0 18px}h2{font-size:21px;letter-spacing:-.5px;margin:0 0 10px}p{margin:0 0 16px}.intro{max-width:640px;color:#62716b;font-size:16px}
+    .grid{display:grid;grid-template-columns:1.05fr 1fr;gap:24px;margin-top:30px}.card{background:#fff;border:1px solid #dde4dd;border-radius:20px;padding:28px}.number{width:28px;height:28px;display:inline-grid;place-items:center;background:#eaf1e9;border-radius:8px;font-size:13px;color:#3e6249;margin-right:8px}
+    .muted{color:#6d7b73;font-size:13px}.field{margin:20px 0}label{display:block;font-size:13px;font-weight:650;margin-bottom:7px}input,textarea{width:100%;border:1px solid #d7e0d7;border-radius:10px;padding:12px 13px;color:#163b36;background:#fafcf9;font:inherit;font-size:14px}input:focus,textarea:focus{outline:2px solid #85ad87;outline-offset:1px}input[readonly],textarea[readonly]{background:#f3f6f0}textarea{resize:vertical;min-height:132px}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow-wrap:anywhere}.uri{background:#eff4eb;border:1px dashed #aebfa8;border-radius:12px;padding:16px;margin:16px 0;user-select:all}.hint{font-size:12px;color:#778378;margin-top:6px}a{color:#325e46;text-underline-offset:3px}button,.button{border:0;background:#244d3c;color:white;border-radius:10px;padding:12px 16px;display:inline-block;font:inherit;font-size:14px;font-weight:600;text-decoration:none;cursor:pointer}button:hover,.button:hover{background:#183c2d}button:disabled{background:#e7ece7;color:#8c978d;cursor:default}.secondary{background:#edf2eb;color:#355640}.secondary:hover{background:#dfe9dc}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}.actions form{margin:0}
+    .notice{background:#e7f1df;border:1px solid #c6d9b8;border-radius:12px;padding:16px;margin:24px 0}.status{margin-top:24px;border-top:1px solid #edf0e9;padding-top:20px}.status strong{font-size:14px}.dot{width:8px;height:8px;display:inline-block;background:#7e9c68;border-radius:50%;margin-right:7px}dl{font-size:12px;margin:14px 0 0;display:grid;grid-template-columns:1fr 1.4fr;gap:9px}dt{color:#718073}dd{margin:0;overflow-wrap:anywhere}.footer{margin-top:26px;color:#7b887c;font-size:12px}.warning{font-size:12px;color:#6c775c;padding:12px 14px;background:#f7f8f0;border-radius:10px;margin-top:18px}
+    @media(max-width:780px){header{padding:20px}.tag{font-size:10px}main{padding:0 20px;margin-top:15px}.grid{grid-template-columns:1fr;gap:16px}.card{padding:22px}h1{letter-spacing:-1px}}
+  </style>
+</head>
+<body>
+  <header><div class="brand">repliq<span>↗</span></div><div class="tag">Перший крок · OLX API</div></header>
+  <main>
+    <p class="eyebrow">ЗВ’ЯЗОК ІЗ КЛІЄНТАМИ</p>
+    <h1>Підключаємо OLX.<br>Готуємо основу для відповідей.</h1>
+    <p class="intro">Repliq — окремий застосунок для роботи з повідомленнями OLX. Почнемо з реєстрації та дозволу на доступ до твого облікового запису.</p>
+    <div class="notice" role="status" $notice_hidden>$notice</div>
+    <div class="grid">
+      <section class="card">
+        <h2><span class="number">1</span>Зареєструй додаток</h2>
+        <p class="muted">Скопіюй дані у форму на порталі розробників OLX.</p>
+        <label>URI зворотного виклику</label>
+        <div class="uri"><code>$registration_uri</code></div>
+        <p class="hint">$callback_hint</p>
+        <div class="field"><label for="app-name">Назва додатка</label><input id="app-name" value="Repliq" readonly></div>
+        <div class="field"><label for="description">Опис для заявки</label><textarea id="description" readonly>Repliq — окремий сервіс для автоматизації відповідей на повідомлення клієнтів у власних оголошеннях OLX. Планується використання даних про товари та залишки зі спільної SQL-бази з CRM і передавання результатів взаємодії до цієї бази.</textarea></div>
+        <p class="muted">Поле «URL веб-сайту» у формі на твоєму скриншоті необов’язкове. Його можна залишити порожнім.</p>
+        <a class="button secondary" href="https://developer.olx.ua/" target="_blank" rel="noreferrer">Відкрити портал OLX ↗</a>
+        <div class="warning">OLX вимагає загальнодоступну адресу й перевіряє заявку. Заповнення URI саме по собі ще не надає доступ до API.</div>
+      </section>
+      <section class="card">
+        <h2><span class="number">2</span>Надай дозвіл Repliq</h2>
+        <p class="muted">Після схвалення заявки OLX надасть Client ID та Client Secret. Внеси їх тут і збережи.</p>
+        <form action="/settings" method="post" autocomplete="off">
+          <input type="hidden" name="csrf" value="$csrf">
+          <div class="field"><label for="callback">URI, вказаний у заявці OLX</label><input id="callback" name="callback_uri" type="url" value="$callback_uri" required spellcheck="false"><p class="hint">Для заявки OLX використовуй публічну HTTPS-адресу з лівої картки.</p></div>
+          <div class="field"><label for="client">Client ID</label><input id="client" name="client_id" value="$client_id" placeholder="Отримаєш від OLX" spellcheck="false"></div>
+          <div class="field"><label for="secret">Client Secret</label><input id="secret" name="client_secret" type="password" placeholder="Встав секретний ключ" autocomplete="new-password"><p class="hint">$secret_hint</p></div>
+          <button class="secondary" type="submit">Зберегти налаштування</button>
+        </form>
+        <div class="actions">
+          <form action="/connect" method="post"><input type="hidden" name="csrf" value="$csrf"><button $connect_disabled>Підключити OLX ↗</button></form>
+        </div>
+        <div class="status"><strong><span class="dot"></span>$status</strong>
+          <dl><dt>Токен дійсний до</dt><dd>$expires</dd><dt>Дозволи OLX</dt><dd>$scope</dd><dt>Спільна SQL-база</dt><dd>Наступний етап</dd></dl>
+          <div class="actions">
+            <form action="/verify" method="post"><input type="hidden" name="csrf" value="$csrf"><button class="secondary" $token_disabled>Перевірити доступ</button></form>
+            <form action="/refresh" method="post"><input type="hidden" name="csrf" value="$csrf"><button class="secondary" $token_disabled>Оновити токени</button></form>
+          </div>
+        </div>
+      </section>
+    </div>
+    <p class="footer">Після підключення відкрий «Запустити автовідповідач.command». Він покаже запит покупця та чернетку «Так, в наявності.» у консолі й надішле її лише після твого «так». Для перевірки без OLX відкрий «Демо автовідповідача.command».</p>
+  </main>
+</body>
+</html>

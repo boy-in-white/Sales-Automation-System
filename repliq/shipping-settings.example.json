@@ -1,0 +1,22 @@
+{
+  "enabled": false,
+  "require_setup": true,
+  "bridge_db": "/absolute/path/repliq-ledgerly/shipments.sqlite3",
+  "sender_place": "Львів",
+  "sender_branch": "Поштомат №65774",
+  "schedule": {"first_half": "first", "second_half": "second"},
+  "profiles": {
+    "first": {
+      "nova_api_key": "",
+      "cod_mode": "money_transfer",
+      "sender": {},
+      "parcel": {"weight_kg": 1, "length_cm": 30, "width_cm": 20, "height_cm": 8, "max_automatic_items": 3}
+    },
+    "second": {
+      "nova_api_key": "",
+      "cod_mode": "money_transfer",
+      "sender": {},
+      "parcel": {"weight_kg": 1, "length_cm": 30, "width_cm": 20, "height_cm": 8, "max_automatic_items": 3}
+    }
+  }
+}

@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+data/
+exports/
+backups/
+
+
+# Local API credentials
+private/

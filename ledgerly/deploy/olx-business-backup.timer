@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily OLX business PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=olx-business-backup.service
+
+[Install]
+WantedBy=timers.target
+

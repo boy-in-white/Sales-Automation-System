@@ -1,0 +1,3 @@
+{
+  "database_url": "postgresql://repliq_reader:REPLACE_PASSWORD@127.0.0.1:5432/olx_business"
+}

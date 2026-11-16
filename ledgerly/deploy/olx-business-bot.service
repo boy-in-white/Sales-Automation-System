@@ -1,0 +1,23 @@
+[Unit]
+Description=OLX and 1C Telegram business bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=olxbot
+Group=olxbot
+WorkingDirectory=/opt/olx-business-bot
+EnvironmentFile=/etc/olx-business-bot.env
+ExecStart=/opt/olx-business-bot/.venv/bin/python /opt/olx-business-bot/main.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/olx-business-bot/data /opt/olx-business-bot/backups
+
+[Install]
+WantedBy=multi-user.target
+

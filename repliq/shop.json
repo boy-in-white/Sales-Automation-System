@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "polling": {
+    "idle_seconds": 10,
+    "active_seconds": 2,
+    "active_window_seconds": 120,
+    "max_active_chats": 4,
+    "debounce_seconds": 1
+  },
+  "limits": {
+    "draft_ttl_seconds": 900,
+    "memory_days": 30,
+    "max_pending_drafts": 200
+  },
+  "olx_timezone": "UTC",
+  "shop": {
+    "delivery": "Можемо відправити OLX Доставкою, післяплатою з передоплатою 100 грн на картку або після повної оплати товару на картку. Який варіант вам зручніший?",
+    "payment": "Можна оплатити товар у самому OLX, обрати післяплату з передоплатою 100 грн на картку або повністю оплатити товар на картку. За післяплати передоплата входить у ціну товару, решту сплачуєте при отриманні. Доставка оплачується окремо.",
+    "returns": null,
+    "order_instructions": "Можемо оформити так:\n1. OLX Доставка — оформлення й повна оплата в самому OLX.\n2. Післяплата — передоплата 100 грн на картку, решта за товар при отриманні.\n3. Повна оплата товару на картку — при отриманні оплачуєте лише доставку.\n\nЯкий варіант вам зручніший?",
+    "discount": "Ціна остаточна, без торгу.",
+    "timezone": "Europe/Kyiv",
+    "owner_telegram": "@boy_in_white",
+    "cod_payment": "deposit"
+  },
+  "products": [
+    {
+      "key": "suvene-pants",
+      "name": "Штани Suvene",
+      "aliases": [
+        "suvene",
+        "suvenue",
+        "сувен",
+        "сувене",
+        "сувене штани"
+      ],
+      "kind": "pants",
+      "advert_ids": [],
+      "ledgerly_product_id": null,
+      "price_uah": null,
+      "description": "60% бавовни (котону), 40% поліестеру. Усередині легкий фліс. Пояс добре тягнеться, є внутрішній шнурок для регулювання. Крій baggy — вільний і широкий.",
+      "measurements": null,
+      "authenticity": null,
+      "size_chart_verified": false,
+      "sizes": [],
+      "garment_measurements": {
+        "S": {
+          "length_cm": 104,
+          "waist_cm": 68,
+          "leg_width_cm": 25
+        },
+        "M": {
+          "length_cm": 106,
+          "waist_cm": 72,
+          "leg_width_cm": 26
+        },
+        "L": {
+          "length_cm": 108,
+          "waist_cm": 76,
+          "leg_width_cm": 27
+        },
+        "XL": {
+          "length_cm": 110,
+          "waist_cm": 78,
+          "leg_width_cm": 27
+        }
+      },
+      "height_guidance": {
+        "S": [
+          174,
+          180
+        ],
+        "M": [
+          180,
+          185
+        ],
+        "L": [
+          185,
+          230
+        ]
+      },
+      "waist_measurement_kind": "flat_width",
+      "fit_note": "Внутрішній підбір за зростом від продавця; вага не визначає розмір. Рекомендація лише на прохання покупця.",
+      "facts": {
+        "material": "60% бавовни (котону) та 40% поліестеру.",
+        "waist": "Так, пояс добре тягнеться. Усередині є шнурок, яким можна відрегулювати посадку.",
+        "lining": "Так, вони утеплені легким флісом.",
+        "pilling": "Тканина якісна, не кошлатиться — катишки не з'являються.",
+        "quality": "Так, штани якісні: тканина приємна, усередині легкий фліс, пояс регулюється шнурком.",
+        "seasons": [
+          "spring",
+          "autumn",
+          "winter"
+        ],
+        "fit": "Крій baggy — штани широкі й доволі вільні.",
+        "rise": "Посадка висока.",
+        "size_fit": "Ця модель великомірить. Для вибору розміру краще звірити заміри.",
+        "comfort_temperature_c": [
+          -10,
+          15
+        ],
+        "print": "Декор виконаний вишивкою — вона міцна й стійка."
+      },
+      "waist_measurement_state": "relaxed",
+      "sizing_basis": "height"
+    },
+    {
+      "key": "gallery-tee",
+      "name": "Футболка Gallery Dept",
+      "aliases": [
+        "gallery dept",
+        "gallery",
+        "галері",
+        "галлери",
+        "галери",
+        "геллері"
+      ],
+      "kind": "tee",
+      "advert_ids": [],
+      "ledgerly_product_id": null,
+      "price_uah": null,
+      "description": "100% бавовна (котон). Футболки не просвічуються. Посадка relaxed — комфортна й трохи вільна.",
+      "measurements": null,
+      "authenticity": null,
+      "size_chart_verified": false,
+      "sizes": [],
+      "garment_measurements": {
+        "S": {
+          "width_cm": 43,
+          "length_cm": 64
+        },
+        "M": {
+          "width_cm": 45,
+          "length_cm": 65
+        },
+        "L": {
+          "width_cm": 47,
+          "length_cm": 67
+        }
+      },
+      "facts": {
+        "material": "100% бавовна (котон).",
+        "fit": "Посадка relaxed — комфортна й трохи вільна.",
+        "transparency": "Футболки не просвічуються, зокрема білі."
+      },
+      "excluded_sizes": [
+        "XL"
+      ],
+      "height_guidance": {
+        "S": [
+          150,
+          160
+        ],
+        "M": [
+          160,
+          170
+        ],
+        "L": [
+          170,
+          180
+        ]
+      },
+      "sizing_basis": "height",
+      "fit_note": "Внутрішній підбір за зростом від продавця. Рекомендація лише на прохання покупця; XL не продається."
+    }
+  ]
+}

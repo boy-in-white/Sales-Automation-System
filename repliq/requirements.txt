@@ -1,0 +1,2 @@
+# Only SQL needs a third-party package. Python 3.9+ (3.11+ recommended).
+psycopg[binary]>=3.2,<4
