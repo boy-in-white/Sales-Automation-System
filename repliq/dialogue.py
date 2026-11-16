@@ -14,7 +14,7 @@ from shop_facts import measurements_reply, shipping_reply, shop_day, alternative
 from shopping_cart import ShoppingCart, YES
 from checkout import Checkout
 from customer_advice import advice_plan, append_fact_answers, fact_answers, FACT_TOPICS
-from size_advice import asks_size_advice, height_advice
+from size_advice import asks_size_advice, height_advice, preferred_available_size
 from conversation_flow import entry as conversation_entry
 from customer_feedback import feedback_kind, APOLOGY
 from customer_phrasing import canonical, customer_greeting
@@ -36,10 +36,11 @@ class Plan:
 
 
 class Dialogue:
-    def __init__(self, catalog, inventory, merchant=None, now=None, address_book=None):
+    def __init__(self, catalog, inventory, merchant=None, now=None, address_book=None, description_source=None):
         self.catalog, self.inventory = catalog, inventory
         self.merchant, self.now = merchant or {}, now
         self.address_book = address_book
+        self.description_source = description_source
 
     def plan(self, texts, saved, advert_id=None, has_attachments=False, delivery_notice=False):
         raw = "\n".join(str(t) for t in texts)
@@ -95,6 +96,9 @@ class Dialogue:
                 result.on_send.pop('checkout_stage',None)
             if result.context.get('checkout_stage') == 'owner':
                 result.context['checkout_stage'] = 'submitted' if saved.get('customer_confirmation') else 'details'
+        if not human and not feedback:
+            from advert_knowledge import fallback
+            fallback(self, result, raw, saved, advert_id, has_attachments)
         if result.on_send.get('handoff_now'):
             result.on_send['owner_requested'] = True
             result.on_send['owner_request_reason'] = 'customer'
@@ -122,7 +126,7 @@ class Dialogue:
                 if len(greeting + result.text) <= 2000:
                     result.text = greeting + result.text
             result.on_send["greeted"] = True
-        return finish(result, saved, original)
+        return finish(result, saved, original, interpreted=raw)
 
     def _dispatch(self, texts, saved, advert_id=None, has_attachments=False):
         if len(texts) > 20 or sum(len(str(t)) for t in texts) > 6000:
@@ -232,7 +236,7 @@ class Dialogue:
         explicit = self.catalog.explicit_products(text)
         notes, guard = [], {}
         if re.search(r"для\s+(?:інш|друг|брат|сестр|чоловік|дружин|дитин|реб[её]н|сина|сына|доньк|дочер|мам|тат|отц|матер)|не\s+для\s+(?:мене|меня)", text):
-            for key in ("height", "weight", "size", "fit", "weight_followup_asked", "weight_declined", "size_advice_requested"):
+            for key in ("height", "height_range", "weight", "size", "fit", "weight_followup_asked", "weight_declined", "size_advice_requested"):
                 context.pop(key, None)
         greeting = "Добрий день! 😊 " if ("greeting" in flags or "availability" in flags) and not context.get("greeted") else ""
         human_needed = False
@@ -284,6 +288,10 @@ class Dialogue:
             for key in ("size", "color", "fit", "topic", "quantity", "size_advice_requested", "weight_followup_asked"):
                 context.pop(key, None)
             context["product"] = selected
+        if 'height' in values and 'height_range' not in values:
+            context.pop('height_range',None)
+        if values.get('height') and values['height']!=context.get('height') and not context.get('weight') and not values.get('weight'):
+            context.pop('weight_followup_asked',None)
         context.update(values)
         if size:
             context["size"] = size
@@ -310,7 +318,7 @@ class Dialogue:
             notes.append("Вкладення без тексту: потрібно переглянути його в OLX.")
             return result(("Вкладення отримав. " if has_attachments else "") + "Підкажіть, будь ласка, що саме вас цікавить щодо товару?", "question")
         if "thanks" in flags and not flags.difference({"thanks", "greeting"}) and not (size or color or values):
-            return result("Немає за що 😊", context.get("awaiting"))
+            return result("Звертайтесь", context.get("awaiting"))
         if "greeting" in flags and not flags.difference({"greeting"}) and not (size or color or values):
             return result("Бажаєте замовити чи допомогти з вибором?", "order")
         if contains(text, "так") or contains(text, "да") or contains(text, "ага"):
@@ -429,6 +437,7 @@ class Dialogue:
         if "measurements" in flags and not flags.intersection({"availability", "order"}):
             return result("\n\n".join(parts), context.get("awaiting"))
         recommendation = None
+        rows = None
         fitted_by_parameters = False
         if (needs_stock and topic == "sizing" and not size and context.get("size") and
                 product["kind"] == "tee" and not product["size_chart_verified"] and product.get("sizing_basis") != "height"):
@@ -443,7 +452,16 @@ class Dialogue:
                 human_needed |= advice.get("human", False)
                 prefix = 'Ви обрали %s. ' % saved['size'] if saved.get('size') and not context.get('height') else ''
                 return result(" ".join(parts + [prefix + advice["question"]]), advice.get("awaiting"))
-            recommendation = advice["size"]
+            if advice.get('candidates'):
+                try:
+                    rows=stock_rows(self.inventory,product)
+                except StockUnavailable:
+                    return result('Наявність зараз не вдалося перевірити. Спробую ще раз перед оформленням.', 'stock')
+                # Only sizes within the buyer's height interval participate.
+                recommendation=preferred_available_size(rows,advice['candidates'],context.get('color'),
+                                                         context.get('quantity',1),advice.get('size'))
+            else:
+                recommendation = advice["size"]
             context["size"] = recommendation
             fitted_by_parameters = "height"
         elif needs_stock and topic == "sizing" and not size:
@@ -478,8 +496,12 @@ class Dialogue:
                 return result(" ".join(parts + ["За цими параметрами краще звірити точні заміри, щоб не помилитися з розміром. Яку посадку ви любите — звичайну чи вільнішу?"]), "fit")
             candidates.sort(key=SIZES.index)
             if len(candidates) > 1 and not context.get("fit"):
-                prefix = "За зростом можна орієнтовно розглянути" if guide else "Ваші параметри на межі розмірів"
-                return result(" ".join(parts + [prefix + " %s. Вам більше подобається звичайна чи вільніша посадка?" % " / ".join(candidates)]), "fit")
+                try:
+                    rows=stock_rows(self.inventory,product)
+                except StockUnavailable:
+                    return result('Наявність зараз не вдалося перевірити. Спробую ще раз перед оформленням.', 'stock')
+                recommended=preferred_available_size(rows,candidates,context.get('color'),context.get('quantity',1))
+                candidates=[recommended]
             recommendation = candidates[-1] if context.get("fit") == "loose" else candidates[0]
             context["size"] = recommendation
             fitted_by_parameters = "height" if guide else "body"
@@ -490,7 +512,8 @@ class Dialogue:
 
         if needs_stock:
             try:
-                rows = stock_rows(self.inventory, product)
+                if rows is None:
+                    rows = stock_rows(self.inventory, product)
                 guard.update(product=product["key"], stock=stock_signature(rows))
             except StockUnavailable as error:
                 human_needed = True

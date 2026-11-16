@@ -43,6 +43,7 @@ from customer_feedback import feedback_kind
 from catalog import normalize
 from conversation_policy import requests_owner
 from conversation_turn import history_excerpt
+from advert_knowledge import AdvertDescriptions
 
 PRINT_LOCK = threading.Lock()
 
@@ -86,6 +87,8 @@ class Worker:
         self.base_catalog = catalog
         self.catalog_path, self.inventory = Path(catalog_path), inventory
         self.dialogue = Dialogue(catalog, inventory, payment_settings(store.path.parent))
+        self.descriptions = AdvertDescriptions(client)
+        self.dialogue.description_source = self.descriptions
         self.stop = stop if stop is not None else threading.Event()
         self.fulfillment = Fulfillment(store.path.parent, self.stop, catalog, can_create=self.parcel_can_create)
         self.monobank = PaymentChecker(store.path.parent, self.fulfillment.queue, self.stop, report=say, health=self.bank_health)
@@ -115,7 +118,7 @@ class Worker:
 
     def heartbeat(self, status="running"):
         self.store.set_meta("worker", {"account": self.account, "session": self.session, "heartbeat": time.time(),
-                                       "status": status, "pid": os.getpid(), "auto_send": self.auto_send, "version": "2026.11.15.2"})
+                                       "status": status, "pid": os.getpid(), "auto_send": self.auto_send, "version": "2026.11.16.1"})
 
     def bank_health(self, value):
         previous = self.store.meta('mono-health')
@@ -293,7 +296,7 @@ class Worker:
             self.telegram_thread = Bridge(self.handoffs, self.telegram_config, self.account, self.stop, say)
             self.telegram_thread.start()
         mode = "Відповідаю автоматично. Керування переданими діалогами — кнопками в Telegram." if self.auto_send else "Відповіді надсилаються після твого підтвердження."
-        say("Repliq 2026.11.15.2 · %s · %s діалогів зафіксовано без читання старих повідомлень.\nЧекаю нові повідомлення. %s\nЗалиш це вікно відкритим, поки бот працює. Ctrl+C — зупинити." % (profile.get("name", "OLX"), len(threads), mode))
+        say("Repliq 2026.11.16.1 · %s · %s діалогів зафіксовано без читання старих повідомлень.\nЧекаю нові повідомлення. %s\nЗалиш це вікно відкритим, поки бот працює. Ctrl+C — зупинити." % (profile.get("name", "OLX"), len(threads), mode))
         manual = sum(r["mode"] in ("waiting", "opening", "human", "paused") for r in self.handoffs.all(self.account))
         if manual:
             say("%s діалогів у ручному режимі. «auto» повертає відповіді одразу; через 40 хвилин без твоїх дій — автоматично." % manual)
@@ -592,6 +595,12 @@ class Worker:
             self.collect(thread_id, metadata)
             return
         guard = payload.get("guard", {})
+        if guard.get('advert_description'):
+            source = guard['advert_description']
+            current_description = self.descriptions.lookup(source['advert']) if self.catalog.adverts.get(source['advert']) == source['product'] else None
+            if not current_description or current_description['signature'] != source['signature']:
+                self.rebuild(draft, 'Опис оголошення змінився. Оновлю відповідь.')
+                return
         if guard.get("payment_settings") and guard["payment_settings"] != payment_signature(payment_settings(self.store.path.parent)):
             self.rebuild(draft, "Реквізити змінилися. Оновлю відповідь.")
             return

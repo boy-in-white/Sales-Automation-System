@@ -16,7 +16,7 @@ from order_summary import snapshot, summary, confirmation_key, order_items, invo
 from carrier_payment import enabled as carrier_enabled, direct_delivery
 from customer_language import requested_sizes, requested_quantity, requested_color, reports_payment
 from checkout_changes import quantity_change
-from size_advice import asks_size_advice, height_advice
+from size_advice import asks_size_advice, height_advice, preferred_available_size
 from customer_contact import contact_details, confirms, close_word
 from customer_phrasing import canonical, cod_mentioned, cod_deposit_question
 
@@ -169,7 +169,7 @@ class Checkout:
             return reply("Зараз допоможу вам особисто й перевірю деталі замовлення.", True)
         if flags and flags <= {"thanks"}:
             sent["awaiting"] = saved.get("awaiting")
-            return reply("Немає за що 😊")
+            return reply("Звертайтесь")
         if direct_delivery(saved) and saved.get('invoice_issued'):
             from carrier_checkout import plan as carrier_plan
             return carrier_plan(self, raw, saved, flags, has_attachments)
@@ -190,6 +190,14 @@ class Checkout:
             if step.get("question"):
                 sent["awaiting"] = step.get("awaiting")
                 return reply(step["question"], step.get("human", False))
+            if step.get('candidates'):
+                try:
+                    rows=stock_rows(self.inventory,product)
+                except StockUnavailable:
+                    return reply('Звірю наявність відповідних розмірів перед зміною. Ваше замовлення збережено.')
+                item=next(item for item in items if item['product']==selected)
+                step['size']=preferred_available_size(rows,step['candidates'],item.get('color'),item.get('quantity',1),step.get('size'))
+                guard['stocks']={selected:stock_signature(rows)}
             context.pop("checkout_size_advice", None)
             context.pop("checkout_advice_product", None)
             sent["awaiting"] = "shipping_details"

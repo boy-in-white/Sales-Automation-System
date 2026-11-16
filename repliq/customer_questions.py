@@ -35,6 +35,18 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
             sent['handoff_now'] = True
         return {'text': body, 'context': context, 'on_send': sent, 'guard': guard, 'notes': []}
 
+    if (saved.get('invoice_issued') and not has_attachments and
+            re.search(r'(?:скільки|сколько|яку\s+суму|какую\s+сумму).{0,25}(?:оплат|сплат|плат|переказ|перевес)',text)):
+        order=snapshot(catalog,saved)
+        amount=order.get('amount')
+        if amount is not None and order.get('method') in ('cod','full'):
+            body=('За цим замовленням передоплата — ' if order['method']=='cod' else 'Повна оплата цього замовлення — ')+money(amount)+' грн.'
+            if saved.get('payment_verified'):
+                body+=' Оплату вже підтверджено, повторно переказувати не потрібно.'
+            if 'dispatch' in flags:
+                body+='\n\n'+shipping_reply(catalog.shop,now)
+            return reply(body,calendar='dispatch' in flags)
+
     if re.fullmatch(r'(?:а\s+)?(?:буде|будуть|появиться|появятся)[?!. ]*',text):
         previous=saved.get('conversation_memory',{}).get('turns',[])
         from customer_language import intents

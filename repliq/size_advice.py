@@ -6,6 +6,14 @@ from customer_language import parameters
 from customer_phrasing import canonical
 
 
+def preferred_available_size(rows, candidates, color=None, quantity=1, preferred=None):
+    """Rank only already suitable sizes; never invent or relabel stock."""
+    counts={size:sum(max(0,row['available']) for row in rows
+                    if row['size_code']==size and (not color or row['color_code']==color)
+                    and row['available']>=quantity) for size in candidates}
+    return max(candidates,key=lambda size:(counts[size],size==preferred,-candidates.index(size)))
+
+
 def asks_size_advice(text, awaiting=None):
     text = canonical(text)
     explicit = bool(re.search(
@@ -25,7 +33,9 @@ def asks_size_advice(text, awaiting=None):
     supplied_parameters = bool((re.search(r'(?:зріст|ріст|рост).{0,22}\d', text) or
                                 re.fullmatch(r'(?:1[2-9]\d|2[0-2]\d|230|[12][.,]\d{1,2})\s*[/; ]\s*\d{2,3}[.! ]*', text)) and
                                not re.search(r'на\s+фото|модел|людині|человек|довжин|длин|ширин|обхват|телефон|\d{7,}', text))
-    return explicit or fit_with_parameters or choosing_sizes or bare_help or supplied_parameters or awaiting == "consultation_help" and bool(re.search(r"розмір|размер|р[іо]ст|зріст", text)) or awaiting in ("size", "cart_size") and bool(re.search(r"порад|рекоменд|посовет|який.{0,15}кращ|какой.{0,15}лучш", text))
+    range_advice=bool(re.search(r'розмір|размер',text) and re.search(r'\d{3}\s*[-–—−]\s*\d{3}',text)
+                      and not re.search(r'довжин|длин|ширин|замір|замер|обхват',text))
+    return range_advice or explicit or fit_with_parameters or choosing_sizes or bare_help or supplied_parameters or awaiting == "consultation_help" and bool(re.search(r"розмір|размер|р[іо]ст|зріст", text)) or awaiting in ("size", "cart_size") and bool(re.search(r"порад|рекоменд|посовет|який.{0,15}кращ|какой.{0,15}лучш", text))
 
 
 def height_advice(product, text, context):
@@ -33,8 +43,12 @@ def height_advice(product, text, context):
         return None
     values, errors = parameters(text, context, weight_for_fit=False)
     if re.search(r"для\s+(?:інш|друг|брат|сестр|чоловік|дружин|дитин|реб[её]н|сина|сына|доньк|дочер|мам|тат|отц|матер)|не\s+для\s+(?:мене|меня)", text):
-        for key in ("height", "weight", "weight_followup_asked", "weight_declined"):
+        for key in ("height", "height_range", "weight", "weight_followup_asked", "weight_declined"):
             context.pop(key, None)
+    if 'height' in values and 'height_range' not in values:
+        context.pop('height_range',None)
+    if values.get('height') and values['height']!=context.get('height') and not context.get('weight') and not values.get('weight'):
+        context.pop('weight_followup_asked',None)
     context.update(values)
     context["size_advice_requested"] = True
     if errors:
@@ -50,6 +64,22 @@ def height_advice(product, text, context):
         context["weight_followup_asked"] = True
         return {"question": "Дякую! Підкажіть ще, будь ласка, вашу вагу.", "awaiting": "weight"}
     guide = product.get("height_guidance", {})
+    interval=context.get('height_range')
+    if interval:
+        matched=[]
+        # Endpoints alone can hide an uncovered gap. Check each centimetre and
+        # both fractional endpoints against the configured guide.
+        points=[interval[0],interval[1]]+list(range(int(interval[0])+1,int(interval[1])+1))
+        for height in points:
+            options=[(limits[0],size) for size,limits in guide.items()
+                     if limits[0]<=height<=limits[1] and size not in product.get('excluded_sizes',[])]
+            if not options:
+                return {'question':'Підкажіть точніший зріст, будь ласка: частина цього діапазону виходить за орієнтири моделі. Можемо також порівняти заміри.', 'awaiting':'height'}
+            matched.append(max(options)[1])
+        choices=list(dict.fromkeys(matched))
+        if len(choices)>1:
+            context['size_advice_requested']=False
+            return {'candidates':choices, 'size':choices[-1]}
     candidates = [(limits[0], size) for size, limits in guide.items()
                   if limits[0] <= context["height"] <= limits[1] and size not in product.get("excluded_sizes", [])]
     if not candidates:
@@ -58,4 +88,7 @@ def height_advice(product, text, context):
     # At a shared boundary use the interval that starts at this height.
     chosen = max(candidates)[1]
     context["size_advice_requested"] = False
-    return {"size": chosen}
+    result={"size": chosen}
+    if len(candidates)>1:
+        result['candidates']=[size for _,size in sorted(candidates)]
+    return result

@@ -38,10 +38,10 @@ def history_excerpt(history, source_ids):
             for row in history if row.get("_id") not in excluded and row.get("type") in ("received", "sent")][-8:]
 
 
-def remember(saved, raw, answer, context, sent):
+def remember(saved, raw, answer, context, sent, interpreted=None):
     memory = saved.get(MEMORY_KEY, {})
     turns = list(memory.get("turns", []))[-MAX_TURNS + 1:]
-    flags = sorted(intents(raw).intersection(INFORMATION))
+    flags = sorted(intents(interpreted if interpreted is not None else raw).intersection(INFORMATION))
     turns.append({"customer": safe_excerpt(raw), "answer": safe_excerpt(answer),
                   "topics": flags, "product": context.get("product")})
     # Slots and invoice data remain in their existing validated representations.
@@ -69,6 +69,15 @@ def prepare(texts, saved, catalog=None):
         if history and history[-1].get('speaker') == 'seller' and 'measurements' in intents(history[-1].get('text', '')):
             previous = {'topics': ['measurements']}
     flags = intents(text)
+    # A short explicit product switch can inherit a factual question, never an
+    # order, payment, quantity or shipping action. Keep the basket untouched.
+    if catalog and len(text.split()) <= 7 and re.match(r'^(?:а|і|та|а\s+у|а\s+в)\s+', text):
+        named = catalog.explicit_products(text)
+        topics = set(previous.get('topics', [])).intersection(TOPIC_HINTS)
+        if (len(named) == 1 and len(topics) == 1 and not flags.intersection({'order','cancel','payment','delivery','complaint','availability'})
+                and not requested_size(text) and not requested_color(text) and not requested_quantity(text)
+                and not flags.intersection(INFORMATION)):
+            return [raw + '\nПитання про ' + TOPIC_HINTS[next(iter(topics))] + '.']
     if (requested_size(text) and ('?' in text or re.match(r'^(?:а|для|у|в|на)\s+', text)) and
             re.fullmatch(r"(?:а\s+)?(?:для\s+|у\s+|в\s+|на\s+)?(?:розмір\w*\s+|размер\w*\s+)?[smlсмлхx]{1,3}[?!. ]*", text) and
             "measurements" in previous.get("topics", [])):
@@ -251,7 +260,7 @@ def checkout_declaration(dialogue, raw, context, flags, has_attachments):
     return Checkout(dialogue.catalog, dialogue.inventory, dialogue.merchant, dialogue.now, dialogue.address_book).plan(raw, state, flags)
 
 
-def finish(plan, saved, raw):
+def finish(plan, saved, raw, interpreted=None):
     """Keep confirmed content while removing repeated sales prompts and filler."""
     original = canonical(raw)
     flags = intents(original)
@@ -274,5 +283,5 @@ def finish(plan, saved, raw):
         if has_selection or 'order' in flags or plan.context.get('product') != saved.get('product') or plan.guard.get('stock') or plan.guard.get('stocks'):
             plan.context.pop('pending_subject_choice',None)
             plan.context.pop('fact_subject',None)
-    plan.on_send[MEMORY_KEY] = remember(saved, raw, plan.text, plan.context, plan.on_send)
+    plan.on_send[MEMORY_KEY] = remember(saved, raw, plan.text, plan.context, plan.on_send, interpreted)
     return plan

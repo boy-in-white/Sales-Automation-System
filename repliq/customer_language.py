@@ -23,6 +23,20 @@ def parameters(text, context, weight_for_fit=True):
     bridge = r"\s*[:=—-]?\s*(?:(?:у|в)\s+(?:мене|меня)\s*)?(?:становить\s*)?"
     patterns["height"][0] = r"(?:зріст|зростом|зросту|рост|ростом|ріст)" + bridge + number
     patterns["weight"][0] = r"(?:вага|вагу|ваги|важу|вес|вешу|весом)" + bridge + number
+    interval = re.search(r'(?:зріст|зростом|зросту|рост|ростом|ріст)\s*(?:(?:від|от)\s*)?' + number +
+                         r'\s*(?:[-–—−]|до)\s*' + number, text)
+    if not interval and context.get('awaiting') in ('height','parameters'):
+        interval = re.fullmatch(number + r'\s*(?:[-–—−]|до)\s*' + number + r'\s*(?:см|м)?[?!. ]*', text)
+    if not interval and re.search(r'розмір|размер',text) and not re.search(r'довжин|длин|ширин|обхват|замір|замер',text):
+        interval=re.search(r'(?<!\d)' + number + r'\s*(?:[-–—−]|до)\s*' + number + r'(?!\d)',text)
+    height_range=None
+    if interval:
+        low,high=(float(interval.group(i).replace(',','.')) for i in (1,2))
+        low,high=(round(v*100,2) if v<3 else v for v in (low,high))
+        if 120<=low<=high<=230 and high-low<=20:
+            height_range=[low,high]
+        else:
+            errors.append('Уточніть, будь ласка, зріст — здається, у діапазоні є описка.')
     garment_question = bool(re.search(r"довжин|длин|ширин|пояс|штанин|зам[іе]р|обхват|груд|талі|тали", text))
     for key, variants in patterns.items():
         matches = []
@@ -40,6 +54,13 @@ def parameters(text, context, weight_for_fit=True):
     if labelled_pair:
         h, w = (float(labelled_pair.group(i).replace(',', '.')) for i in (1, 2))
         result.update(height=round(h * 100, 2) if h < 3 else h, weight=w)
+    correction=re.fullmatch(r'(?:ні|не|нет|ой|помилився|помилилась|помилилася)\s*[, :—-]*\s*'+number+r'[.! ]*',text)
+    if correction and context.get('awaiting') in ('height','weight','parameters'):
+        value=float(correction[1].replace(',','.'))
+        if value<3 or 120<=value<=230:
+            result['height']=round(value*100,2) if value<3 else value
+        else:
+            result['weight']=value
     # A bare pair is accepted only when it comprises the entire message.
     pair = re.fullmatch(r"(?:(?:на|у мене|я|давай|давайте|добре|окей|ок|так|ось|тоді|ну)\s*[, :]?[ ]*){0,3}" +
                         number + r"\s*(?:[/;,\s]|\bі\b|\bи\b|\bта\b)\s*" + number + r"[.!]?", text)
@@ -76,6 +97,10 @@ def parameters(text, context, weight_for_fit=True):
     if multi_person:
         result.clear()
         errors = ["Давайте підберемо по черзі. Для кого зараз обираємо — які зріст і вага цієї людини?"]
+    elif height_range:
+        result.update(height=sum(height_range)/2,height_range=height_range)
+    elif interval:
+        result.pop('height',None)
     return result, errors
 
 

@@ -2,6 +2,7 @@
 
 import copy
 import re
+from decimal import Decimal, InvalidOperation
 
 from catalog import COLORS, SIZES
 from customer_language import requested_sizes, requested_colors, requested_quantity, parameters
@@ -9,7 +10,7 @@ from customer_phrasing import canonical
 from inventory import StockUnavailable, stock_rows, stock_signature
 from size_advice import asks_size_advice
 from order_summary import order_items
-from shop_facts import measurements_reply
+from shop_facts import measurements_reply, money
 
 
 def selected_product(catalog, saved, advert):
@@ -156,7 +157,9 @@ def invoice_variant(catalog, inventory, text, saved, flags, has_attachments=Fals
     if not (saved.get('invoice_issued') or basket_question) or has_attachments:
         return None
     sizes, colors = requested_sizes(text), requested_colors(text)
-    if not (sizes or colors) or flags.intersection({'measurements', 'photos', 'material', 'description', 'returns', 'complaint', 'cancel'}):
+    quantity=requested_quantity(text)
+    quantity_question=quantity is not None and bool(re.search(r'\?|якщо|если',text)) and 'order' not in flags
+    if not (sizes or colors or quantity_question) or flags.intersection({'measurements', 'photos', 'material', 'description', 'returns', 'complaint', 'cancel'}):
         return None
     if asks_size_advice(text, saved.get('awaiting')) or re.search(r'\b(?:телефон\w*|місто|город|село|піб|фіо|фио|адрес\w*|відділен\w*|поштомат\w*)\b|\d{7,}', text):
         return None
@@ -200,6 +203,16 @@ def invoice_variant(catalog, inventory, text, saved, flags, has_attachments=Fals
         if labels:
             body += ' У розмірі %s є: %s.' % (size, ', '.join(labels))
         return reply(body + ' Ваш попередній вибір збережено без змін.', guard)
+    if quantity_question:
+        cost=''
+        try:
+            price=Decimal(str(item.get('unit_price')))
+            if price.is_finite() and price>=0:
+                cost=' Разом — '+money(price*amount)+' грн за товар.'
+        except (InvalidOperation,TypeError,ValueError):
+            pass
+        return reply('Так, '+str(amount)+' шт. цього варіанта є в наявності.'+cost+
+                     ' Якщо берете '+str(amount)+' шт., напишіть — оновлю замовлення. Поки зберігаю попередню кількість.',guard)
     different = size != item.get('size') or color != item.get('color')
     requested_change = bool('order' in flags or re.search(r'змін|замін|помін|помен|хочу|інший|другой', text))
     if different and requested_change:

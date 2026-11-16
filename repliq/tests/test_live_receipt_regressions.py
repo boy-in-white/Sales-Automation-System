@@ -91,7 +91,7 @@ class BuyerRegressionTests(unittest.TestCase):
         f=consultation.ConsultationTests();f.setUp()
         for text in ('красавчик','молодець','красава'):
             p=f.bot.plan([text],{'owner_requested':True,'greeted':True},'101')
-            self.assertIn('Немає за що',p.text)
+            self.assertIn('Звертайтесь',p.text)
             self.assertNotIn('власник',p.text.lower())
             self.assertFalse(p.on_send.get('handoff_now'))
         p=f.bot.plan(['Ти лох'],{'owner_requested':True,'greeted':True},'101')

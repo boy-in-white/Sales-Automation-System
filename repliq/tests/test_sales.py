@@ -83,11 +83,13 @@ class DialogueTests(unittest.TestCase):
             self.assertEqual(p.context["weight"], 68)
             self.assertIn("M", p.text)
 
-    def test_overlapping_chart_asks_fit(self):
+    def test_overlapping_chart_prefers_available_suitable_size(self):
         p = self.bot.plan(["рост 178 вес 72"], {}, "101")
-        self.assertEqual(p.context["awaiting"], "fit")
-        next_plan = self.bot.plan(["вільнішу"], p.context, "101")
-        self.assertIn("L", next_plan.text)
+        from size_advice import preferred_available_size
+        rows = DemoInventory().rows(self.bot.catalog.products['suvene-pants'])
+        self.assertEqual(p.context['size'], preferred_available_size(rows,['M','L']))
+        self.assertEqual(self.stock.calls,['suvene-pants'])
+        self.assertNotEqual(p.context.get('awaiting'),'fit')
 
     def test_sql_zero_overrides_on_hand_assumptions(self):
         self.stock.empty = True

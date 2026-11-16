@@ -55,10 +55,10 @@ def entry(text, saved, product=None, has_attachments=False):
                 "on_send": {"awaiting": "size"}, "guard": {"archive_order": True}, "notes": []}
     if help_requested:
         context.update(awaiting="parameters", topic="sizing", size_advice_requested=True)
-        return {"text": "Звісно, допоможу 🙂 Напишіть ваш зріст і вагу — підберемо розмір. Якщо цікавить щось інше про товар, також запитуйте.", "context": context,
+        return {"text": "Звісно, допоможу 🙂 Напишіть ваш зріст та вагу — підберемо розмір. Якщо цікавить щось інше про товар, також запитуйте", "context": context,
                 "on_send": {"awaiting": "parameters"}, "guard": {"archive_order": True} if restart else {}, "notes": []}
     if saved.get("awaiting") == "consultation_choice" and confirms(text):
-        return {"text": "Підкажіть, який розмір і колір бажаєте? Якщо потрібна порада з розміром — допоможу підібрати.",
+        return {"text": "Підкажіть, який розмір і колір бажаєте? Якщо потрібна порада з розміром — допоможу підібрати",
                 "context": context, "on_send": {"awaiting": "size"}, "guard": {}, "notes": []}
     if restart:
         return {'continue': True, 'context': context, 'guard': {'archive_order': True}}
