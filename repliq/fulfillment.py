@@ -71,8 +71,13 @@ def parcel_payload(catalog, context, account, thread, buyer, advert):
         if (not product or not product.get("ledgerly_product_id") or not item.get("size") or not item.get("color") or
                 item["size"] in product.get("excluded_sizes", []) or item.get("unit_price") is None or not 1 <= item["quantity"] <= 20):
             return None
+        if item.get('stock_size'):
+            from size_fulfillment import previous_size
+            if not product.get('size_substitution_enabled') or item.get('size_substitution') is not True or item['stock_size'] != previous_size(item['size']):
+                return None
         items.append({"product": product["key"], "product_id": str(product["ledgerly_product_id"]), "name": item["name"],
-                      "size": item["size"], "color": item["color"], "quantity": item["quantity"], "unit_price_cents": cents(item["unit_price"])})
+                      "size": item.get("stock_size", item["size"]), "color": item["color"], "quantity": item["quantity"], "unit_price_cents": cents(item["unit_price"]),
+                      **({"requested_size": item["size"], "size_substituted": True} if item.get("size_substitution") else {})})
     if order["total"] is None or order["amount"] is None:
         return None
     total, advance = cents(order["total"]), cents(order["amount"])
@@ -165,7 +170,7 @@ class Fulfillment:
                 stocks = {}
                 for (key, size, color), quantity in demands.items():
                     if key not in stocks:
-                        stocks[key] = stock_groups(stock_rows(self.inventory, self.catalog.products[key]))
+                        stocks[key] = stock_groups(self.inventory.rows(self.catalog.products[key]))
                     if stocks[key].get((size, color), 0) < quantity:
                         raise CarrierError("stock_changed_before_waybill")
             client = self.carrier_factory(profile)

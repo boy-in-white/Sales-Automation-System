@@ -87,7 +87,8 @@ class InboxTests(unittest.TestCase):
             for button in buttons
             if getattr(button, 'callback_data', None)
         ]
-        self.assertIn('sub:r:' + row['submission_id'], callbacks_data)
+        self.assertNotIn('sub:r:' + row['submission_id'], callbacks_data)
+        self.assertNotIn('sub:c:' + row['submission_id'], callbacks_data)
         self.assertEqual(business.get_inventory_variant(self.pv['id'])['reserved'], 0)
         self.assertEqual(business.get_inventory_variant(self.tv['id'])['reserved'], 0)
         self.assertIsNone(business.get_order_by_ttn(TTN))
@@ -108,8 +109,9 @@ class InboxTests(unittest.TestCase):
         self.assertIn('Зараховано як передоплату 100 грн',text)
         self.assertIn('при отриманні: 2000',text)
         self.assertNotIn('Перевір оплату та',text)
-        self.assertEqual(row['ledgerly_status'],'sent')
-        self.assertEqual(business.get_inventory_variant(self.pv['id'])['reserved'],0)
+        self.assertEqual(row['ledgerly_status'],'confirmed')
+        self.assertEqual(business.get_inventory_variant(self.pv['id'])['reserved'],2)
+        self.assertEqual(business.get_order_by_ttn(TTN)['status'], 'CONFIRMED')
 
     def test_owner_can_override_monobank_and_auto_does_not_reenable_it(self):
         row=self.delivered()
@@ -124,7 +126,7 @@ class InboxTests(unittest.TestCase):
         data.update(method='full',advance_cents=data['total_cents'],cod_cents=0,bank_payment={'scope':'old-marker'})
         row=self.created(data)
         text=inbox.card_text(row)
-        self.assertIn('Перевір оплату та підтвердь',text)
+        self.assertIn('Перевір оплату —',text)
         self.assertNotIn('Дочекайся автоматичної перевірки',text)
 
     def test_bank_amendment_is_visible_as_review_needed(self):
@@ -255,6 +257,23 @@ class InboxTests(unittest.TestCase):
         callbacks.handle_callback(self.bot, self.call('sub:r:' + row['submission_id']))
         self.assertIsNone(business.get_order_by_ttn(TTN))
         self.assertEqual(business.get_submission(row['submission_id'])['status'], 'PENDING')
+
+    def test_payment_then_refresh_reserves_automatically_without_order_confirmation(self):
+        row = self.delivered()
+        callbacks.handle_callback(self.bot, self.call('rp:%s:%s:paid' % (row['id'], row['invoice_key'][:12])))
+        self.receiver.next_send = 0
+        self.receiver.refresh()
+        current = self.queue.get(row['id'])
+        self.assertEqual(current['ledgerly_status'], 'confirmed')
+        self.assertEqual(business.get_inventory_variant(self.pv['id'])['reserved'], 2)
+        buttons = [b.callback_data for line in inbox.keyboard(current).keyboard for b in line if b.callback_data]
+        self.assertIn('sub:c:' + row['submission_id'], buttons)
+        self.assertFalse(any(b.startswith('sub:r:') for b in buttons))
+        self.receiver.next_send = 0
+        self.receiver.refresh()
+        self.assertEqual(business.get_inventory_variant(self.pv['id'])['reserved'], 2)
+        callbacks.handle_callback(self.bot, self.call('sub:c:' + row['submission_id']))
+        self.assertEqual(business.get_order_by_ttn(TTN)['status'], 'SHIPPED')
 
     def test_confirmation_reserves_every_item_before_shipping_without_double_reserve(self):
         row = self.confirmed()

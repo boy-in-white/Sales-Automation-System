@@ -27,9 +27,9 @@ def advert_price(advert):
         return None
 
 
-def process_admin(worker):
+def process_admin(worker, allowed=None):
     registry = worker.registry
-    job = registry.next_job()
+    job = registry.next_job(allowed=allowed, claim=True)
     if not job:
         return
     owner, key = job["owner"], job["event_key"]
@@ -117,7 +117,7 @@ def process_admin(worker):
                 worker.invalidate_ad(ad)
                 registry.tell(owner, "result:" + key, "Збережено: %s → %s. Оброблятимуться лише нові повідомлення.\n"
                               "Прив'язка діє відразу; перезапуск не потрібний." % (ad, selected["canonical_name"]),
-                              registry.menu(catalog=True))
+                              {'inline_keyboard': [[{'text':'📏 Налаштувати товар', 'callback_data':registry.choice(owner, {'_action':'sizing_open','product_id':str(selected['id'])})}]]})
             else:
                 if not found:
                     raise AppError("Не знайшов відповідний товар у Ledgerly. Відкрий «📦 Товари», знайди потрібну назву й повтори додавання оголошення.")

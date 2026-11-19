@@ -102,6 +102,8 @@ class Bridge(threading.Thread):
         self.offset_key = "telegram-offset:" + self.scope
         self.next_send = 0.0
         self.next_private_send = 0.0
+        self.admin_worker = None
+        self.last_private_activity = 0.0
         self.registry = Registry(self.store, account)
         self.orders = OrderBoard(self.store)
         self.next_delivery, self.health_at, self.health_value = 0.0, 0.0, None
@@ -400,6 +402,7 @@ class Bridge(threading.Thread):
         if (owner is None or sender.get("id") != owner or chat.get("id") != owner or sender.get("is_bot") or
                 message.get("forward_origin") or message.get("forward_date") or message.get("via_bot") or message.get("sender_chat")):
             return True
+        self.last_private_activity = time.monotonic()
         key = "admin:%s:%s" % (self.scope, update["update_id"])
         if isinstance(query, dict):
             data = str(query.get("data", ""))
@@ -714,6 +717,21 @@ class Bridge(threading.Thread):
         self.store.set_meta(self.offset_key, {"value": ident + 1})
         self.update_failures.pop(ident, None)
 
+    def fast_admin(self):
+        # Pure local catalog/editor work must not queue behind OLX histories.
+        # Writes requiring a runtime catalog swap stay in the main worker.
+        worker = self.admin_worker
+        if worker is None:
+            return
+        from catalog_admin import process_admin
+        allowed = ['sizing_list', 'sizing_open', 'sizing_facts', 'sizing_edit', 'sizing_preview']
+        if self.registry.products():
+            allowed.append('products')
+        for _ in range(4):
+            if not self.registry.next_job(allowed=allowed):
+                break
+            process_admin(worker, allowed=allowed)
+
     def _run(self):
         delay, bootstrapped = 5, False
         while not self.stop.is_set():
@@ -723,8 +741,15 @@ class Bridge(threading.Thread):
                     self.bootstrap()
                     bootstrapped = True
                     self.output("Telegram: групу й власників перевірено. Передані діалоги мають окремі теми.")
+                self.fast_admin()
+                # Private UI has an independent queue; a broken group topic
+                # must not prevent the owner's catalog/menu from arriving.
+                try:
+                    self.deliver_private()
+                except TelegramError as error:
+                    self.report_error(error, 'private_ui')
                 if time.monotonic() >= self.next_delivery:
-                    for step in (self.create_topic, self.deliver, self.deliver_private, self.sync_topic_name, self.topic_controls.cleanup):
+                    for step in (self.create_topic, self.deliver, self.sync_topic_name, self.topic_controls.cleanup):
                         phase = step.__name__
                         try:
                             step()
@@ -741,7 +766,7 @@ class Bridge(threading.Thread):
                                         (self.account,)).fetchone() is not None
                 with self.store.db() as db:
                     queued = db.execute("SELECT 1 FROM bridge_outbox o JOIN handoffs h ON h.account=o.account AND h.thread=o.thread WHERE o.account=? AND o.status='pending' AND h.topic_id IS NOT NULL LIMIT 1", (self.account,)).fetchone() is not None
-                updates = self.api.call("getUpdates", {"offset": offset, "limit": 20, "timeout": 1 if queued else 2 if active else 5,
+                updates = self.api.call("getUpdates", {"offset": offset, "limit": 20, "timeout": 1 if queued or time.monotonic() - self.last_private_activity < 40 else 2 if active else 5,
                                                       "allowed_updates": ["message", "callback_query"]})
                 if self.polling_interrupted:
                     self.output('Telegram: з’єднання відновлено. Отримання команд продовжується.')
@@ -749,6 +774,8 @@ class Bridge(threading.Thread):
                 for update in updates:
                     phase = "update"
                     self.consume_update(update)
+                self.fast_admin()
+                self.deliver_private()
                 if time.monotonic() >= self.next_delivery:
                     self.health("ready")
                 delay = 5

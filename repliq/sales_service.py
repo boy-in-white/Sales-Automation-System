@@ -8,7 +8,6 @@ import re
 import signal
 import sqlite3
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -32,13 +31,14 @@ from checkout import payment_settings, payment_signature
 from shop_facts import shop_day, shipping_reply
 from order_board import OrderBoard
 from order_summary import restore_legacy_invoice, snapshot, invoice_key, confirmation_key
-from customer_updates import CustomerUpdates
+from customer_updates import CustomerUpdates, can_watch_shipment, shipped_waybill
 from manual_session import selection_after_manual
 from fulfillment import Fulfillment, parcel_payload
 from fulfillment_queue import digest as parcel_digest
 from monobank_payments import PaymentChecker, marker as bank_marker
 from shipping_directory import ShippingDirectory
 from customer_language import intents
+from customer_phrasing import wants_dispatch_notice
 from customer_feedback import feedback_kind
 from catalog import normalize
 from conversation_policy import requests_owner
@@ -46,6 +46,7 @@ from conversation_turn import history_excerpt
 from advert_knowledge import AdvertDescriptions
 
 PRINT_LOCK = threading.Lock()
+WORKER_VERSION = '2026.11.19.4'
 
 
 def clean(value):
@@ -118,7 +119,7 @@ class Worker:
 
     def heartbeat(self, status="running"):
         self.store.set_meta("worker", {"account": self.account, "session": self.session, "heartbeat": time.time(),
-                                       "status": status, "pid": os.getpid(), "auto_send": self.auto_send, "version": "2026.11.16.1"})
+                                       "status": status, "pid": os.getpid(), "auto_send": self.auto_send, "version": WORKER_VERSION})
 
     def bank_health(self, value):
         previous = self.store.meta('mono-health')
@@ -167,11 +168,11 @@ class Worker:
                     fresh_messages, product.get('name', 'OLX'), self.names.cached(self.account, buyer))
         self.last_heartbeat = time.monotonic()
 
-    def owner_payment(self, context, live):
-        """A slow stock/address lookup must not overwrite the owner's payment checkbox."""
+    def merge_order_updates(self, context, live):
+        """Preserve payment and shipment updates that arrived after a draft was prepared."""
         if (context.get("invoice_id") and context.get("invoice_id") == live.get("invoice_id") and
                 invoice_key(snapshot(self.catalog, context)) == invoice_key(snapshot(self.catalog, live))):
-            for key in ("payment_verified", "payment_verified_by", "verified_invoice_key"):
+            for key in ("payment_verified", "payment_verified_by", "verified_invoice_key", "parcel", "shipment_notice_invoice"):
                 if key in live:
                     context[key] = live[key]
         return context
@@ -181,7 +182,7 @@ class Worker:
             if not db.in_transaction:
                 db.execute("BEGIN IMMEDIATE")
             live = self.store.context(self.account, thread, buyer, advert, self.catalog.data["limits"]["memory_days"])
-            context = self.owner_payment(context, live)
+            context = self.merge_order_updates(context, live)
             self.store.save_context(self.account, thread, buyer, advert, context)
         return context
 
@@ -291,12 +292,15 @@ class Worker:
         if self.handoffs.all(self.account):
             self.schedule.next_inbox_at = time.monotonic()
         self.heartbeat()
+        with self.store.db() as db:
+            db.execute("UPDATE admin_jobs SET status='queued' WHERE account=? AND status='working'", (self.account,))
         self.ready.set()
         if self.telegram_config:
             self.telegram_thread = Bridge(self.handoffs, self.telegram_config, self.account, self.stop, say)
+            self.telegram_thread.admin_worker = self
             self.telegram_thread.start()
         mode = "Відповідаю автоматично. Керування переданими діалогами — кнопками в Telegram." if self.auto_send else "Відповіді надсилаються після твого підтвердження."
-        say("Repliq 2026.11.16.1 · %s · %s діалогів зафіксовано без читання старих повідомлень.\nЧекаю нові повідомлення. %s\nЗалиш це вікно відкритим, поки бот працює. Ctrl+C — зупинити." % (profile.get("name", "OLX"), len(threads), mode))
+        say("Repliq %s · %s · %s діалогів зафіксовано без читання старих повідомлень.\nЧекаю нові повідомлення. %s\nЗалиш це вікно відкритим, поки бот працює. Ctrl+C — зупинити." % (WORKER_VERSION, profile.get("name", "OLX"), len(threads), mode))
         manual = sum(r["mode"] in ("waiting", "opening", "human", "paused") for r in self.handoffs.all(self.account))
         if manual:
             say("%s діалогів у ручному режимі. «auto» повертає відповіді одразу; через 40 хвилин без твоїх дій — автоматично." % manual)
@@ -362,6 +366,10 @@ class Worker:
             if buffer["advert"] == str(advert):
                 self.buffers.pop(thread_id, None)
 
+    def bot_sent_ids(self, thread_id):
+        with self.store.db() as db:
+            return {row[0] for row in db.execute("SELECT message FROM olx_sent WHERE account=? AND thread=? AND speaker='bot'", (self.account, thread_id))}
+
     def collect(self, thread_id, metadata):
         current_count = count(metadata)
         # Explicit allowlist: unrelated adverts are never read, drafted or exported.
@@ -408,6 +416,13 @@ class Worker:
         self.delivery_alerts(thread_id, buyer, advert, fresh_messages)
         if route and route["mode"] != "bot":
             new = [m for m in history if m["_id"] in allowed]
+            if route['mode'] == 'human':
+                raw = '\n'.join(m.get('text') or '' for m in new if m.get('type') == 'received')
+                if wants_dispatch_notice(raw) and not intents(raw).intersection({'cancel', 'complaint'}):
+                    context = self.store.context(self.account, thread_id, buyer, advert, self.catalog.data['limits']['memory_days'])
+                    if can_watch_shipment(context, raw) and not shipped_waybill(context.get('parcel', {})):
+                        context['shipment_notice_invoice'] = context['invoice_id']
+                        self.save_dialogue_context(thread_id, buyer, advert, context)
             if route["mode"] == "waiting":
                 incoming = [m for m in new if m.get("type") == "received"]
                 if incoming:
@@ -426,10 +441,9 @@ class Worker:
         old_buffer = self.buffers.get(thread_id)
         if old_buffer and old_buffer["buyer"] == buyer and old_buffer["advert"] == advert:
             allowed.update(old_buffer["source_ids"])
-        fresh = candidate(history, allowed, include_delivery_notices=True)
+        fresh = candidate(history, allowed, include_delivery_notices=True, transparent_sent=self.bot_sent_ids(thread_id))
         self.counts[thread_id] = current_count
         if self.telegram_config and (route or any(m.get("type") == "received" for m in fresh_messages)):
-            product = self.catalog.products.get(self.catalog.adverts.get(advert), {})
             self.handoffs.watch(self.account, thread_id, buyer, advert, current_count,
                                 self.conversation_title(buyer, advert))
             self.handoffs.title(self.account, thread_id, self.conversation_title(buyer, advert))
@@ -495,7 +509,7 @@ class Worker:
             if buffer["due"] > time.monotonic() or self.stop.is_set():
                 continue
             context = copy.deepcopy(buffer["input_context"]) if "input_context" in buffer else self.store.context(self.account, thread_id, buffer["buyer"], buffer["advert"], self.catalog.data["limits"]["memory_days"])
-            context = self.owner_payment(context, self.store.context(self.account, thread_id, buffer["buyer"], buffer["advert"], self.catalog.data["limits"]["memory_days"]))
+            context = self.merge_order_updates(context, self.store.context(self.account, thread_id, buffer["buyer"], buffer["advert"], self.catalog.data["limits"]["memory_days"]))
             mapped_product = self.catalog.adverts.get(buffer["advert"])
             if context.get("_ad_product") != mapped_product and context.get("product") != mapped_product:
                 context = {k: v for k, v in context.items() if k in ("height", "weight", "greeted")}
@@ -564,12 +578,17 @@ class Worker:
         if not draft:
             return
         payload, thread_id = draft["payload"], draft["thread"]
+        from payment_exception import GUARD_KEY, valid_draft
+        exceptional = GUARD_KEY in payload.get('guard', {})
+        if exceptional and not valid_draft(self.inventory, payload):
+            self.rebuild(draft, 'Умови винятку змінилися. Повторно перевірю відмови та згоду клієнта.')
+            return
         customer_requested_owner = requests_owner('\n'.join(payload.get('texts', [])))
-        if payload.get('on_send', {}).get('handoff_now') and not customer_requested_owner:
+        if payload.get('on_send', {}).get('handoff_now') and not (customer_requested_owner or exceptional):
             self.rebuild(draft, 'Оновлю відповідь відповідно до правила виклику власника на прохання клієнта.')
             return
         if payload.get('on_send', {}).get('handoff_now'):
-            payload['on_send'].update(owner_requested=True, owner_request_reason='customer')
+            payload['on_send'].update(owner_requested=True, owner_request_reason='payment_exception' if exceptional else 'customer')
         route = self.handoffs.get(self.account, thread_id)
         if route and route["mode"] != "bot" or payload["advert"] not in self.catalog.adverts:
             self.stale(draft, "Діалог передано власнику або оголошення не дозволене.")
@@ -589,7 +608,7 @@ class Worker:
             self.stale(draft, "Змінилася прив’язка клієнта або оголошення.")
             return
         history = ordered(self.client.messages(thread_id), thread_id, self.catalog.timezone)
-        current = candidate(history, set(payload["source_ids"]), include_delivery_notices=bool(payload.get('delivery_notices')))
+        current = candidate(history, set(payload["source_ids"]), include_delivery_notices=bool(payload.get('delivery_notices')), transparent_sent=self.bot_sent_ids(thread_id))
         if len(history) != count(metadata) or not current or current["fingerprint"] != payload["fingerprint"]:
             self.stale(draft, "Клієнт або продавець уже дописав у діалог.")
             self.collect(thread_id, metadata)
@@ -641,7 +660,7 @@ class Worker:
                 return
             if self.stop.is_set() or not self.store.transition(draft["id"], "approved", "sending"):
                 return
-            notify_owner = bool(payload.get("on_send", {}).get("handoff_now") and customer_requested_owner and not (route and route.get('attention')))
+            notify_owner = bool(payload.get("on_send", {}).get("handoff_now") and (customer_requested_owner or exceptional) and not (route and route.get('attention')))
             if notify_owner:
                 title = self.conversation_title(buyer, advert)
                 # Claim and help routing are atomic with an owner's takeover.
@@ -730,7 +749,7 @@ class Worker:
             payment_matches = current and current["invoice_key"] == row["invoice_key"]
             payment_changed = payment_matches and bool(context.get("payment_verified")) != bool(row["paid"])
             if context.get("parcel") == parcel and not payment_changed:
-                if parcel.get('payment_review_revision'):
+                if parcel.get('payment_review_revision') or (shipped_waybill(parcel) and context.get('shipment_notice_invoice') == row['invoice_id']):
                     self.customer_updates.schedule(self.account, row['thread'], data['buyer'], data['advert'], context, self.catalog)
                 continue
             context["parcel"] = parcel
@@ -843,7 +862,8 @@ class Worker:
         parcel = order.get("parcel", {})
         from carrier_payment import direct_delivery, enabled as carrier_enabled, ready, waybill_message
         review_request = item['kind'] == 'payment_review'
-        payment_required = not review_request and (item['kind'] != 'waybill' or not direct_delivery(order))
+        shipped_update = item['kind'] == 'shipped'
+        payment_required = not (review_request or shipped_update) and (item['kind'] != 'waybill' or not direct_delivery(order))
         if (order["id"] != item["invoice_id"] or invoice_key(order) != item["invoice_key"] or
                 order["confirmation"] != confirmation_key(order) or
                 parcel.get("status") in ("needs_review", "invalid", "uncertain", "cancelled")):
@@ -861,6 +881,15 @@ class Worker:
         if item["kind"] == "waybill" and (parcel.get("status") != "created" or parcel.get("ttn") != item["ttn"]):
             self.customer_updates.finish(item["id"], "stale", "waybill_changed")
             return
+        if shipped_update and (shipped_waybill(parcel) != item['ttn'] or context.get('shipment_notice_invoice') != item['invoice_id']):
+            self.customer_updates.finish(item['id'], 'stale', 'shipment_changed')
+            return
+        if shipped_update and context.get('shipment_notice_announced') == item['ttn']:
+            self.customer_updates.finish(item['id'], 'sent', 'announced_in_reply')
+            return
+        if item['kind'] == 'waybill' and shipped_waybill(parcel) and context.get('shipment_notice_invoice') == order['id']:
+            self.customer_updates.finish(item['id'], 'stale', 'included_in_shipping_notice')
+            return
         if str(self.client.identity()["id"]) != self.account:
             raise AppError("Акаунт OLX змінився; повідомлення про відправку зупинені.", status=401)
         metadata = self.client.thread(item["thread"])
@@ -874,9 +903,21 @@ class Worker:
             return
         if review_request:
             text = 'На жаль, оплату не вдалося підтвердити. Надішліть, будь ласка, квитанцію ще раз — фото або скріншот у цей чат.'
+        elif shipped_update:
+            history = ordered(self.client.messages(item['thread']), item['thread'], self.catalog.timezone)
+            if len(history) != count(metadata):
+                return
+            reference = re.escape(item['ttn']) + '|' + re.escape(item['invoice_id'])
+            for message in history:
+                body = str(message.get('text') or '')
+                if (message.get('type') == 'sent' and re.search(r'(?<!\w)(?:' + reference + r')(?!\w)', body, re.I) and
+                        re.search(r'\b(?:відправлено|відправили|відправив|відправила|отправлено|отправили|отправил|отправила)\b', body, re.I) and
+                        not re.search(r'\b(?:не|ще)\s+(?:відправл|відправи|отправл|отправи)', body, re.I)):
+                    self.customer_updates.finish(item['id'], 'sent', 'already_in_olx')
+                    return
+            text = 'Посилку відправлено. Ваша ТТН — ' + item['ttn'] + '.\nЗа нею можна відстежити посилку в Новій пошті.'
         elif item["kind"] == "waybill":
             history = ordered(self.client.messages(item["thread"]), item["thread"], self.catalog.timezone)
-            import re
             if any(m.get("type") == "sent" and re.search(r"(?<!\d)" + re.escape(item["ttn"]) + r"(?!\d)", str(m.get("text", ""))) for m in history):
                 self.customer_updates.finish(item["id"], "sent", "already_in_olx")
                 return
@@ -884,7 +925,8 @@ class Worker:
                     "Ось ваша ТТН: " + item["ttn"] + "\nВаше замовлення №" + order['id'] + "\nНакладну підготовлено для відправлення.")
         elif item['kind'] == 'delivery_paid':
             intro = 'Дякую, оплату доставки підтверджено! ' if carrier_enabled(self.catalog.shop) else 'Дякую! '
-            text = intro + ('Посилку вже відправлено.' if parcel.get('ledgerly_status')=='shipped' else shipping_reply(self.catalog.shop)) + '\nВаше замовлення №' + order['id']
+            suffix = ('Посилку вже відправлено.' if context.get('shipment_notice_invoice') != order['id'] else '') if shipped_waybill(parcel) else shipping_reply(self.catalog.shop)
+            text = (intro + suffix).strip() + '\nВаше замовлення №' + order['id']
         else:
             text = "Дякую! " + shipping_reply(self.catalog.shop)
         active = self.store.context(self.account, item["thread"], item["buyer"], item["advert"], self.catalog.data["limits"]["memory_days"])
@@ -903,6 +945,11 @@ class Worker:
         if ((payment_required and (not current.get("payment_verified") or current.get("verified_invoice_key") != item["invoice_key"])) or
                 invoice_key(current_order) != item["invoice_key"] or current_order["confirmation"] != confirmation_key(current_order)):
             return
+        if shipped_update and (current.get('shipment_notice_invoice') != item['invoice_id'] or
+                               shipped_waybill(current.get('parcel', {})) != item['ttn'] or
+                               current.get('shipment_notice_announced') == item['ttn']):
+            self.customer_updates.finish(item['id'], 'stale', 'shipment_changed')
+            return
         if self.fulfillment.queue and current.get("parcel", {}).get("id"):
             row = self.fulfillment.queue.get(current["parcel"]["id"])
             if not row or row['invoice_key'] != item['invoice_key'] or row["nova_status"] in ("needs_review", "invalid", "uncertain", "cancelled"):
@@ -911,6 +958,9 @@ class Worker:
             if payment_required and not ready(row):
                 self.customer_updates.finish(item['id'], 'stale', 'payment_wait')
                 return
+            if shipped_update and (row['ledgerly_status'] != 'shipped' or row['nova_status'] != 'created' or row['ttn'] != item['ttn']):
+                self.customer_updates.finish(item['id'], 'stale', 'shipment_changed')
+                return
             if review_request and (row['paid'] or row.get('payment_source') != 'owner' or
                                    not row.get('paid_by') or not row.get('payment_manual_lock') or
                                    row.get('payment_review_revision') != item['revision'] or
@@ -918,8 +968,8 @@ class Worker:
                                    row['ledgerly_status'] in ('shipped', 'cancelled')):
                 self.customer_updates.finish(item['id'], 'stale', 'payment_review_resolved')
                 return
-        elif review_request:
-            self.customer_updates.finish(item['id'], 'stale', 'payment_review_unavailable')
+        elif review_request or shipped_update:
+            self.customer_updates.finish(item['id'], 'stale', 'shipment_unavailable' if shipped_update else 'payment_review_unavailable')
             return
         if not self.customer_updates.claim(item["id"]):
             return
@@ -976,11 +1026,12 @@ class Worker:
                         self.orders.cleanup(self.catalog.data["limits"]["memory_days"])
                         self.last_purge = now
                     self.last_cleanup = now
+                # Local Telegram edits remain available during OLX backoff.
+                process_admin(self)
                 if now >= self.retry_at:
                     try:
                         if now >= self.next_product_sync:
                             self.refresh_products()
-                        process_admin(self)
                         self.resume_expired()
                         self.process_cycle()
                         self.failures = 0

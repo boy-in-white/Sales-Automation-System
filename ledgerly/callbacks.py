@@ -10,9 +10,7 @@ from zoneinfo import ZoneInfo
 from auth import ANALYTICS_ACCESS
 from business_db import (
     COLOR_LABELS,
-    claim_submission,
     clear_current_month_analytics,
-    finish_submission,
     format_money,
     get_order_by_ttn,
     get_submission,
@@ -31,7 +29,6 @@ from config import (
     is_employee,
     is_owner,
 )
-from incoming_group_listener import process_submission
 from inventory import handle_inventory_callback
 from ui import awaiting_shipment_keyboard
 
@@ -83,26 +80,8 @@ def _process_pending_submission(
     submission: dict[str, Any],
     actor_id: int,
 ) -> bool:
-    submission_id = str(submission["id"])
-    if submission.get("status") == "CONFIRMED":
-        return True
-    if submission.get("status") != "PENDING" or not claim_submission(
-        submission_id, actor_id
-    ):
-        return False
-    try:
-        from repliq_inbox import process_imported
-
-        outcome = process_imported(bot, submission)
-        if outcome is None:
-            outcome = process_submission(bot, submission)
-        success = outcome in {"processed", "repeat"}
-        finish_submission(submission_id, success)
-        return success
-    except Exception:
-        finish_submission(submission_id, False)
-        LOGGER.exception("Submission %s failed", submission_id)
-        raise
+    from submission_service import prepare_submission
+    return prepare_submission(bot, submission, actor_id)[0]
 
 
 def _inventory_result_text(result: dict[str, Any]) -> str:
@@ -230,7 +209,7 @@ def _submission_action(bot: Any, call: Any, action: str, submission_id: str) -> 
         if not shipment_allowed(bot, call, submission_id):
             return
         offline = bool((submission.get("parsed") or {}).get("offline"))
-        if submission.get("status") == "PENDING":
+        if submission.get("status") in {"PENDING", "PROCESSING"}:
             try:
                 if not _process_pending_submission(bot, submission, actor_id):
                     bot.answer_callback_query(
@@ -381,6 +360,13 @@ def handle_callback(bot: Any, call: Any) -> None:
         return
     actor_id = int(call.from_user.id)
     data = str(call.data or "")
+    if data.startswith('new:'):
+        if not is_admin(actor_id):
+            bot.answer_callback_query(call.id, 'Лише для адміністратора', show_alert=True)
+            return
+        from order_entry import handle_callback as handle_order_callback
+        handle_order_callback(bot, call)
+        return
     if data.startswith("analytics:"):
         if not is_owner(actor_id):
             bot.answer_callback_query(call.id, "Лише для власника", show_alert=True)
@@ -391,6 +377,18 @@ def handle_callback(bot: Any, call: Any) -> None:
                 "Фінанси вже закриті. Спочатку /unlock пароль",
                 show_alert=True,
             )
+            return
+        if data.startswith('analytics:chart:'):
+            if call.message.chat.id != actor_id or getattr(call.message.chat, 'type', 'private') != 'private':
+                bot.answer_callback_query(call.id, 'Діаграми доступні в особистому чаті', show_alert=True)
+                return
+            period = data.split(':', 2)[2]
+            if period not in ('month', 'all'):
+                bot.answer_callback_query(call.id, 'Невідомий період', show_alert=True)
+                return
+            bot.answer_callback_query(call.id, 'Готую діаграми…')
+            from handlers import _handle_charts
+            _handle_charts(bot, actor_id, [period])
             return
         if data == "analytics:cancel:current":
             _finish_message(bot, call, "Очищення скасовано")

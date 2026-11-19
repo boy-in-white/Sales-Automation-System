@@ -15,6 +15,82 @@ LABELS = {
     "branch": r"(?:відділення\s+або\s+поштомат\s+нп,?\s*номер|номер\s+(?:відділення|поштомата)(?:\s*\([^)]*\))?)",
 }
 
+# Recipient fields must describe a person or a destination, never a promise,
+# acknowledgment, question or an instruction to the assistant. Case is not a
+# signal: customers legitimately write their names entirely in lower case.
+CONVERSATION = re.compile(
+    r'^(?:добре|хорошо|ладно|гаразд|зараз|сейчас|секунд\w*|хвилин\w*|минут\w*|'
+    r'одну\s+(?:хвилин\w*|минут\w*)|зачека\w*|почека\w*|подожди\w*|чекай\w*|'
+    r'готово|згоден|згодна|зрозум\w*|понял\w*|вже|уже|ще|еще|пізніше|потім|потом|'
+    r'де|куди|скільки|чи|можна|можно|буде|будуть|сколько|кто|куда|где|'
+    r'заміни\w*|замініть|змініть|поменя\w*|замени\w*)\b|'
+    r'\b(?:зроблю|сделаю|заповню|заполню|скину|надішлю|пришлю|відправлю|отправлю|'
+    r'зачекайте|підтверджую|оформлюйте|перепрошую)\b', re.I)
+STREET_PART = r'(?:вул(?:иця|иці|ицю)?\.|вулиц[яію]\s+|ул(?:ица|ице|ицу)?\.|улиц[ауы]\s+|проспект\w*\s+|провулок\s+|переулок\s+)'
+STREET = re.compile(r'^' + STREET_PART, re.I)
+KIND = r'(?:відділен[а-яіїєґё]*|отделен[а-яіїєґё]*|поштомат[а-яіїєґё]*|почтомат[а-яіїєґё]*|від\.|отд\.)'
+CARRIER = r'(?:нова\s+пошта|новая\s+почта|нп)'
+MARKER = r'(?:номер\s*:?[ \t]*|no\.?\s*|[nн]\s*[*.°º]?\s*|[№#:]\s*)'
+BRANCH_TITLE = r'(?:поштове\s+|почтовое\s+)?' + KIND + r'(?:\s+(?:нп|нової\s+пошти|новой\s+почты))?'
+POINT = (r'\b(?:' + CARRIER + r'\s*[,.:—-]?\s*)?' + BRANCH_TITLE + r'\s*(?:на\s+)?' +
+         r'(?:' + MARKER + r')?\d{1,6}\b(?:\s+нп)?|\b' + CARRIER + r'\s*(?:' + MARKER + r')?\d{1,6}\b|'
+         r'\b\d{1,6}\s*[-—]?\s*' + BRANCH_TITLE)
+PLACE_PREFIX = r'(?:м\.|с\.|м\s+|с\s+|смт\.?\s*|місто\s+|город\s+|село\s+|селище\s+)'
+AREA_PART = r'[А-Яа-яІіЇїЄєҐґЁё-]+\s+(?:обл(?:асть|асті)?\.?|район(?:у)?|р-н)'
+PLACE_TYPES = {'м': 'місто', 'місто': 'місто', 'город': 'місто',
+               'с': 'село', 'село': 'село', 'смт': 'селище', 'селище': 'селище'}
+PHONE_SPAN = re.compile(r'(?<![\d+])(?:\+?38)?0(?:[ ().-]*\d){9}(?!\d)')
+INLINE_LABEL = r'\s+(?=(?:' + '|'.join(LABELS.values()) + r')\s*[:—])'
+SIDEBAR = re.compile(r'\b(?:передоплат\w*|оплат\w*|предоплат\w*|перед\s+плат\w*|переказ\w*|'
+                     r'замовлен\w*|отправл\w*|квитанц\w*|скинув|скинула|сума|сумма|ттн|'
+                     r'тканин\w*|карта|картк\w*|доставк\w*|замір\w*|розмір\w*)\b', re.I)
+
+
+def conversational(value):
+    value = normalize(value)
+    return bool(CHAT.search(value) or DISCOURSE.search(value) or CONVERSATION.search(value) or confirms(value))
+
+
+def waiting_acknowledgment(raw):
+    """A buyer taking time is not failing to supply a field or confirming payment."""
+    text = normalize(raw)
+    words = re.findall(r"[\w'’]+", text)
+    allowed = r'(?:добре|хорошо|ладно|гаразд|ок|окей|так|да|ага|зараз|сейчас|все|усе|всё|всьо|'
+    allowed += r'я|вам|вже|уже|ще|еще|трохи|трошки|одну|одна|будь|ласка|пожалуйста|дякую|спасибо|'
+    allowed += r'зроблю|сделаю|заповню|заполню|скину|скидаю|надішлю|пришлю|відправлю|отправлю|шукаю|ищу|'
+    allowed += r'секунд\w*|хвилин\w*|минут\w*|зачека\w*|почека\w*|подожди\w*|чекай\w*|пізніше|потім|потом|згодом|'
+    allowed += r'і|и|та|дані|данні|данные|квитанц\w*|чек|скр[іи]н|скр[іи]ншот|фото)'
+    return bool(words and '?' not in text and len(text) <= 160 and
+                all(re.fullmatch(allowed, word) for word in words) and
+                re.search(r'зараз|сейчас|секунд|хвилин|минут|зачека|почека|подожди|чекай|пізніше|потім|потом|згодом|скину|надішлю|пришлю', text))
+
+
+def clean_place(value):
+    value = str(value).strip(' ,;')
+    point = re.search(POINT, value, re.I)
+    if point:
+        value = value[:point.start()].strip(' ,;')
+    street = re.search(r'(?<=[,\s])' + STREET_PART, value, re.I)
+    if street:
+        value = value[:street.start()].rstrip(' ,;')
+    leading_area = re.match(r'^(' + AREA_PART + r')[, ]+(' + PLACE_PREFIX + r'.+)$', value, re.I)
+    if leading_area:
+        value = leading_area[2].rstrip('.') + ', ' + leading_area[1]
+    value = re.sub(r'^' + PLACE_PREFIX + r'\s*', '', value, flags=re.I)
+    value = re.sub(r'(?<=[^\s,])\s+(' + AREA_PART + r')(?=$|[,\s])', r', \1', value, flags=re.I).strip(' ,')
+    return value
+
+
+def locality_type(value):
+    value = re.sub(r'^' + AREA_PART + r'[, ]+', '', value.strip(), flags=re.I)
+    match = re.match(PLACE_PREFIX, value, re.I)
+    return PLACE_TYPES.get(match[0].casefold().strip(' .')) if match else None
+
+
+def valid_place(value):
+    return bool(3 <= len(value) <= 200 and re.search(r'[A-Za-zА-Яа-яІіЇїЄєҐґ]', value) and
+                not conversational(value) and not STREET.search(value) and not SIDEBAR.search(value))
+
 
 def confirms(text):
     text = normalize(text)
@@ -34,12 +110,12 @@ def branch_value(value):
     # NFKC expands the numero sign to "No"; preserve it as an address marker.
     value = normalize(str(value).replace("№", "#")).strip(" .,:;")
     value = re.sub(r'^(?:заміни|замініть|змініть|поміняй|поменяйте|замени|нове|новий|інше|інший)\s+', '', value)
-    value = re.sub(r'((?:відділення|отделение|поштомат|почтомат))\s+на\s+', r'\1 ', value)
-    value = re.sub(r"^(?:нова\s+пошта|новая\s+почта|нп)\s*[,.:—-]?\s*", "", value)
-    kind = r"(?:відділен[а-яіїєґё]*|отделен[а-яіїєґё]*|поштомат[а-яіїєґё]*|почтомат[а-яіїєґё]*|від\.|отд\.|нп)"
-    patterns = (r"^" + kind + r"\s*(?:нп\s*)?[:№#—-]?\s*(\d{1,6})\s*(?:нп)?$",
-                r"^[№#:]?\s*(\d{1,6})\s*[-—]?\s*" + kind + r"(?:\s+нп)?$",
-                r"^[№#:]?\s*(\d{1,6})$")
+    value = re.sub(r'^(?:на|до|в|у)\s+', '', value)
+    value = re.sub(r"^" + CARRIER + r"\s*[,.:—-]?\s*", "", value)
+    value = re.sub(MARKER + r'(?=\d)', '#', value, flags=re.I)
+    patterns = (r"^" + BRANCH_TITLE + r"\s*(?:на\s+)?[:#—-]?\s*(\d{1,6})\s*(?:нп)?$",
+                r"^[#:]?\s*(\d{1,6})\s*[-—]?\s*" + BRANCH_TITLE + r"$",
+                r"^[#:]?\s*(\d{1,6})$")
     for pattern in patterns:
         match = re.fullmatch(pattern, value, re.I)
         if match:
@@ -48,32 +124,60 @@ def branch_value(value):
 
 
 def valid_name(value):
-    return bool(NAME.fullmatch(value) and not CHAT.search(normalize(value)) and not DISCOURSE.search(normalize(value)) and not confirms(value) and
+    return bool(NAME.fullmatch(value) and not conversational(value) and
+                all(len(word) > 1 for word in value.split()) and
                 not re.search(r'^(?:не\s+(?:знаю|хочу|можу|могу|буду|пам.?ятаю|помню)|немає\b|нет\s+данн)', normalize(value)) and
-                not re.search(r"область|\bобл\b|район|поштомат|відділен|отделен", value, re.I))
+                not re.search(r"област[ьіи]|\bобл\b|район|поштомат|відділен|отделен|нова\s+пошта|новая\s+почта", value, re.I) and
+                not re.match(PLACE_PREFIX, value, re.I) and not STREET.search(value) and not SIDEBAR.search(value))
+
+
+def contact_segments(raw):
+    return re.split(r'[\n;|]+|(?<=[.!?])\s+(?=(?:а\s+|і\s+)?(?:чи|як|яки[йх]|яка|яке|коли|скільки|можна|можно|како[йея]|как|когда|сколько|на\s+(?:зиму|літо))\b)', raw, flags=re.I)
 
 
 def contact_details(raw, saved, awaiting=None):
     result, values = copy.deepcopy(saved), {}
+    # Repair only self-evident parser pollution from previous releases. Never
+    # reconstruct a payment, name or phone from another conversation or seller.
+    if result.get('name') and not valid_name(result['name']):
+        result.pop('name', None)
+    if result.get('place'):
+        embedded = re.search(POINT, result['place'], re.I)
+        if embedded and not result.get('branch'):
+            point = branch_value(embedded[0])
+            if point:
+                result['branch'] = point
+        place = clean_place(result['place'])
+        if valid_place(place):
+            result['place'] = place
+        else:
+            result.pop('place', None)
+            result.pop('place_type', None)
     # Accept a pasted form, semicolon-separated fields or one natural line.
-    raw_lines = re.split(r"[\n;|]+", raw)
     lines = []
-    point_pattern = (r"(?:відділен[а-яіїєґё]*|отделен[а-яіїєґё]*|поштомат[а-яіїєґё]*|почтомат[а-яіїєґё]*|нп)\s*[:№#-]?\s*\d{1,6}\b|"
-                     r"\b\d{1,6}\s*(?:відділен[а-яіїєґё]*|отделен[а-яіїєґё]*|поштомат[а-яіїєґё]*|почтомат[а-яіїєґё]*)")
-    for line in raw_lines:
-        # Keep labelled fields together; the normal parser validates them below.
-        phone = re.search(r"(?<!\d)(?:\+?38)?0(?:[ ().-]*\d){9}(?!\d)", line)
-        if phone and re.search(r"[А-Яа-яІіЇїЄєҐґA-Za-z]", line) and not re.match(r"^(?:телефон|номер\s+телефону|тел[.:])", line.strip(), re.I):
+    candidates = [part for segment in contact_segments(raw) for part in re.split(INLINE_LABEL, segment, flags=re.I)]
+    for line in candidates:
+        if '?' in line:
+            continue
+        # Extract a complete phone first, so an adjacent house or branch number
+        # cannot make a valid phone appear too long.
+        phone = PHONE_SPAN.search(line)
+        if not phone:
+            phone = re.search(r'(?<![\d+])(?:\+?38)?0(?:[ ().-]*\d){7,10}(?!\d)', line)
+        if phone and re.search(r"[А-Яа-яІіЇїЄєҐґA-Za-z]", line) and not SIDEBAR.search(line[:phone.start()]):
             before = line[:phone.start()].strip(" ,:")
             after = line[phone.end():].strip(" ,:")
             before = re.sub(r"^(?:ось|вот)\s+(?:квитанц[а-яіїєґё]*|(?:мої\s+)?дані)\s*[,.:—-]\s*", "", before, flags=re.I)
-            if before:
+            before = re.sub(r'(?:^|[,\s])' + LABELS['phone'] + r'\s*(?:на)?$', '', before, flags=re.I).strip(' ,:')
+            if before and not conversational(before):
                 lines.append(before)
             lines.append(phone[0])
             line = after
-        point = re.search(point_pattern, line, re.I)
-        if point and line[:point.start()].strip(" ,:") and not re.match(r"^(?:номер|відділення\s+або)\b", line.strip(), re.I):
-            lines.append(line[:point.start()].strip(" ,:"))
+        point = re.search(POINT, line, re.I)
+        if point and not conversational(line) and not re.match(r"^(?:номер|відділення\s+або)\b", line.strip(), re.I):
+            before = line[:point.start()].strip(' ,:')
+            if before:
+                lines.append(before)
             lines.append(point[0])
             rest = line[point.end():].strip(" ,:")
             if rest:
@@ -83,18 +187,20 @@ def contact_details(raw, saved, awaiting=None):
     source = [(i, re.sub(r"^[1-4][.)]\s+", "", line.strip(" •\t"))) for i, line in enumerate(lines) if line.strip()]
     free, phone_line = [], None
     for index, line in source:
-        if '?' in line:
-            continue  # A question about a field is not a correction to that field.
         line = re.sub(r'^(?:новий|нові|нове|інший|інша|новый|новая)\s+(?=телефон|номер|місто|город|відділення|поштомат)', '', line, flags=re.I)
+        line = re.sub(r'^(?:заміни|замініть|змініть|поміняй|поменяйте|замени)\s+(?=' + '|'.join(LABELS.values()) + r')', '', line, flags=re.I)
         if any(re.fullmatch(label + r'\s*[:—-]?\s*', line, re.I) for label in LABELS.values()):
             continue  # Pasting an empty template must not become an address.
         labeled = False
         for field, label in LABELS.items():
             match = re.match(r"^" + label + r"\s*(?:[:—-]\s*|\s+)(.+)$", line, re.I)
             if match:
-                value = match[1].strip()
+                value = re.sub(r'^на\s+', '', match[1].strip(), flags=re.I)
                 if not re.fullmatch(r'[:—.\s_\-]*', value):
                     values[field] = value
+                    if field == 'place':
+                        label = line[:match.start(1)].casefold().strip(' :—-')
+                        values['place_type'] = PLACE_TYPES.get(label) or locality_type(value)
                 if field == "phone":
                     phone_line = index
                 labeled = True
@@ -106,11 +212,13 @@ def contact_details(raw, saved, awaiting=None):
             values["phone"], phone_line = line, index
             continue
         point = branch_value(line)
+        bare_pair = (len(source) == 2 and result.get('phone') and result.get('name') and not result.get('branch') and
+                     any(i != index and valid_place(clean_place(other)) for i, other in source))
         if point and (re.search(r"від|отд|поштомат|почтомат|нп|пошта|почта|[№#]", line, re.I) or
-                      awaiting == "branch" or len(source) >= 2 or all(result.get(k) for k in ("name", "phone", "place"))):
+                      awaiting == 'branch' or not result.get('branch') and len(source) >= 3 or bare_pair):
             values["branch"] = point
             continue
-        if CHAT.search(normalize(line)) or DISCOURSE.search(normalize(line)) or confirms(line) or line.endswith(":"):
+        if conversational(line) or STREET.search(line) or SIDEBAR.search(line) or line.endswith(":"):
             continue
         free.append((index, line))
     if "name" not in values:
@@ -125,37 +233,32 @@ def contact_details(raw, saved, awaiting=None):
                 values["name"] = value
                 free = [(i, line) for i, line in free if i != index]
     if "place" not in values:
-        places = [(i, line) for i, line in free if re.search(r"[A-Za-zА-Яа-яІіЇїЄєҐґ]", line)]
+        places = [(i, line) for i, line in free if valid_place(clean_place(line))]
         if places and (not result.get("place") or awaiting == "place" or phone_line is not None):
             values["place"] = ", ".join(line for _, line in places)[:200]
     if "name" in values:
         if valid_name(values["name"]):
             result["name"] = values["name"]
-        else:
-            result.pop("name", None)
     if "phone" in values:
         phone = re.sub(r"[\s()+.-]", "", values["phone"])
         if re.fullmatch(r"0\d{9}", phone):
             phone = "38" + phone
         if re.fullmatch(r"380\d{9}", phone):
             result["phone"] = "+" + phone
-        else:
-            result.pop("phone", None)
     if "place" in values:
-        place = values["place"].strip()
-        if (3 <= len(place) <= 200 and re.search(r"[A-Za-zА-Яа-яІіЇїЄєҐґ]", place) and
-                not CHAT.search(normalize(place)) and not DISCOURSE.search(normalize(place)) and not confirms(place) and
-                not re.search(r'^(?:не\s+(?:знаю|хочу|можу|могу|буду|пам.?ятаю|помню)|немає\b|нет\s+данн)', normalize(place))):
+        place = clean_place(values["place"])
+        if valid_place(place):
+            kind = values.get('place_type') or locality_type(values['place'])
+            if kind:
+                result['place_type'] = kind
+            elif place != result.get('place'):
+                result.pop('place_type', None)
             result["place"] = place
-        else:
-            result.pop("place", None)
     if "branch" in values:
         point = branch_value(values["branch"])
         if point:
             result["branch"] = point
-        else:
-            result.pop("branch", None)
-    if result.get("place") != saved.get("place"):
+    if (result.get("place"), result.get('place_type')) != (saved.get("place"), saved.get('place_type')):
         for key in ("city_ref", "warehouse_ref", "branch_address"):
             result.pop(key, None)
     elif result.get("branch") != saved.get("branch"):

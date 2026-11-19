@@ -9,6 +9,7 @@ END $$;
 GRANT CONNECT ON DATABASE olx_business TO repliq_reader;
 GRANT USAGE ON SCHEMA analytics TO repliq_reader;
 GRANT SELECT ON analytics.v_inventory_stock TO repliq_reader;
+GRANT SELECT ON analytics.v_refusal_policy TO repliq_reader;
 GRANT USAGE ON SCHEMA business TO repliq_reader;
 GRANT SELECT (id,canonical_name,category,brand,active) ON business.products TO repliq_reader;
 GRANT SELECT (product_id,raw_alias) ON business.product_aliases TO repliq_reader;

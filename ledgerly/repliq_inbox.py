@@ -77,6 +77,11 @@ def validate(row, require_ttn=True):
                 type(item.get('unit_price_cents')) is not int or not 0 < item['unit_price_cents'] <= 100000000 or
                 not re.fullmatch(r'[A-Z]{1,12}', str(item.get('size', ''))) or not re.fullmatch(r'[A-Z]{1,16}', str(item.get('color', '')))):
             raise ValueError('Invalid item')
+        if item.get('size_substituted') or item.get('requested_size'):
+            sizes=('XS','S','M','L','XL','XXL')
+            requested=item.get('requested_size')
+            if item.get('size_substituted') is not True or requested not in sizes or item['size'] not in sizes or sizes.index(requested)-sizes.index(item['size']) != 1:
+                raise ValueError('Invalid substituted size')
         total += item['quantity'] * item['unit_price_cents']
     expected_advance = 0 if carrier else 10000 if data['method']=='cod' else total
     if (total != data.get('total_cents') or type(data.get('advance_cents')) is not int or
@@ -91,7 +96,7 @@ def validate(row, require_ttn=True):
 
 def description(data):
     colors = {'BLACK': 'чорний', 'WHITE': 'білий', 'GRAY': 'сірий'}
-    return '; '.join('%s %s %s — %s шт.' % (item['name'], item['size'], colors.get(item['color'], item['color']), item['quantity']) for item in data['items'])
+    return '; '.join('%s %s %s — %s шт.' % (item['name'], ((item['requested_size'] + ' (відправити ' + item['size'] + ')') if item.get('size_substituted') else item['size']), colors.get(item['color'], item['color']), item['quantity']) for item in data['items'])
 
 
 def receipt_links(row):
@@ -170,13 +175,13 @@ def card_text(row):
     elif row.get('ledgerly_status') == 'confirmed':
         instruction = '\n\nЗамовлення підтверджено, товар зарезервовано. «Відправлено» натискай після фактичної передачі посилки.'
     elif carrier:
-        instruction = '\n\nНакладна підготовлена. Дочекайся підтвердження оплати доставки або перевір її в НП вручну. Потім підтвердь замовлення.'
+        instruction = '\n\nНакладна підготовлена. Дочекайся підтвердження оплати доставки або перевір її в НП вручну. Товар зарезервується автоматично.'
     else:
         auto_deposit = data['method'] == 'cod' and data['advance_cents'] == 10000 and bool(data.get('bank_payment'))
-        instruction = ('\n\nОплату підтверджено. Перевір і підтвердь замовлення — після цього товар буде зарезервовано.' if row['paid'] else
+        instruction = ('\n\nОплату підтверджено. Товар резервується автоматично. Натисни «Відправлено» після передачі посилки.' if row['paid'] else
                        '\n\nПеревір надходження вручну й підтвердь оплату кнопкою. Твоє рішення автоматично не змінюється.' if row.get('payment_manual_lock') else
-                       '\n\nНакладна підготовлена. Дочекайся автоматичної перевірки mono або перевір оплату вручну, потім підтвердь замовлення — товар буде зарезервовано.' if auto_deposit else
-                       '\n\nНакладна підготовлена. Перевір оплату та підтвердь замовлення — після цього товар буде зарезервовано.')
+                       '\n\nНакладна підготовлена. Дочекайся автоматичної перевірки mono або перевір оплату вручну. Далі товар зарезервується автоматично.' if auto_deposit else
+                       '\n\nНакладна підготовлена. Перевір оплату — після цього товар зарезервується автоматично.')
     return with_receipts(title + ' · Repliq №' + data['invoice_id'] + '\n\n' + description(data) +
             '\nРазом за товари: ' + amount(data['total_cents']) + ' грн.' +
             ('\nПередоплати за товар немає.' if carrier else '\nПередоплата: ' + amount(data['advance_cents']) + ' грн.') +
@@ -211,11 +216,10 @@ def keyboard(row, preparing=False):
     for index, url in enumerate(links[:3], 1):
         keys.add(types.InlineKeyboardButton('🧾 Квитанція' + (' %s' % index if len(links)>1 else ''), url=url))
     if not preparing:
-        if row.get('ledgerly_status') == 'confirmed':
+        if carrier_ready(row):
             keys.add(types.InlineKeyboardButton('📦 Відправлено', callback_data='sub:c:' + row['submission_id']))
         else:
-            keys.add(types.InlineKeyboardButton('✅ Підтвердити замовлення', callback_data='sub:r:' + row['submission_id']),
-                     types.InlineKeyboardButton('✏️ Виправити', callback_data='sub:e:' + row['submission_id']))
+            keys.add(types.InlineKeyboardButton('✏️ Виправити', callback_data='sub:e:' + row['submission_id']))
         keys.add(types.InlineKeyboardButton('Скасувати', callback_data='sub:x:' + row['submission_id']))
     return keys
 
@@ -246,6 +250,7 @@ class Receiver:
         self.bot, self.queue, self.owner, self.group, self.topic = bot, queue, owner, group, topic
         self.next_send = 0.0
         self.next_heartbeat = 0.0
+        self.next_prepare = {}
         self.heartbeat()
 
     def heartbeat(self):
@@ -275,6 +280,7 @@ class Receiver:
             saved = get_submission(row['submission_id'])
             if saved and saved.get('telegram_message_id'):
                 self.queue.delivered(row['id'], saved['telegram_message_id'])
+                self.prepare_ready(row['id'])
                 return True
             if not self.queue.before_publish(row['id']):
                 return False
@@ -296,6 +302,7 @@ class Receiver:
                 message_id = message.message_id
             attach_submission_message(row['submission_id'], self.group, message_id)
             self.queue.delivered(row['id'], message_id)
+            self.prepare_ready(row['id'])
             self.next_send = time.monotonic() + 3.2
             return True
         except (ValueError, KeyError, TypeError):
@@ -339,6 +346,8 @@ class Receiver:
             self.next_send = time.monotonic() + 3.2
             return
         for row in self.queue.notifications():
+            self.prepare_ready(row['id'])
+            row = self.queue.get(row['id'])
             row = self.decorate(row)
             if row['ledgerly_status'] not in ('sent', 'confirmed', 'shipped', 'cancelled') or not row['message_id'] or row['notified_revision'] == row['payment_revision']:
                 continue
@@ -351,6 +360,21 @@ class Receiver:
                 db.execute('UPDATE parcels SET notified_revision=? WHERE id=?', (row['payment_revision'], row['id']))
             self.next_send = time.monotonic() + 3.2
             return
+
+    def prepare_ready(self, row_id):
+        row = self.queue.get(row_id)
+        if not row or row['ledgerly_status'] not in ('sent', 'confirmed') or not carrier_ready(row):
+            return
+        if self.next_prepare.get(row_id, 0) > time.monotonic():
+            return
+        from submission_service import prepare_submission
+        saved = get_submission(row['submission_id'])
+        if not saved:
+            return
+        success, warning = prepare_submission(self.bot, saved, self.owner, 'Repliq')
+        self.next_prepare[row_id] = time.monotonic() + (300 if success else 60)
+        if warning:
+            LOGGER.warning('Repliq inventory reservation needs review: %s', row_id)
 
     def decorate(self, row):
         receipts = self.queue.receipts(row['id'])

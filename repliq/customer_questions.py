@@ -8,12 +8,22 @@ import copy
 from decimal import Decimal, InvalidOperation
 import re
 
-from customer_phrasing import canonical, cod_mentioned, cod_deposit_question
+from customer_phrasing import canonical, cod_mentioned, cod_deposit_question, wants_dispatch_notice
+from customer_updates import can_watch_shipment, shipped_waybill
+from customer_language import intents
 from order_summary import snapshot
-from shop_facts import money, shipping_reply, shop_day, FULL_PREPAYMENT_REFUND, COD_DEPOSIT_REFUND, COD_DEPOSIT_PURPOSE, COD_WITHOUT_PREPAYMENT
+from shop_facts import measurements_reply, money, shipping_reply, shop_day, FULL_PREPAYMENT_REFUND, COD_DEPOSIT_REFUND, COD_DEPOSIT_PURPOSE, COD_WITHOUT_PREPAYMENT
 from selection_guard import selected_product
 from olx_delivery import delivery_plan
 from carrier_payment import direct_delivery, enabled as carrier_enabled
+
+
+def tracking_definition(text):
+    text = canonical(text)
+    term = bool(re.search(r'\b(?:ттн|накладн(?:а|ая|ої|ой|у|ою|ую))\b|трек.{0,10}номер', text))
+    meaning = bool(re.search(r'що\s+(?:таке|це|означає)|что\s+(?:такое|это|значит)|(?:це|это)\s+(?:що|шо|что)|'
+                             r'(?:ттн|накладн\w*).{0,20}(?:номер|номером)\s+(?:замов|заказ)', text))
+    return term and meaning
 
 
 def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_attachments=False):
@@ -22,9 +32,6 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
     named = catalog.explicit_products(text)
     product = named[0] if len(named) == 1 else selected_product(catalog, saved, advert)
     facts = product.get('facts', {}) if product else {}
-    delivery = delivery_plan(catalog, raw, saved, now)
-    if delivery is not None:
-        return delivery
 
     def reply(body, human=False, updates=None, calendar=False):
         guard = {'shipping_day': str(shop_day(catalog.shop, now))} if calendar else {}
@@ -35,8 +42,71 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
             sent['handoff_now'] = True
         return {'text': body, 'context': context, 'on_send': sent, 'guard': guard, 'notes': []}
 
+    bare_question = bool(re.fullmatch(r'[?？!\s]+', text))
+    turns = saved.get('conversation_memory', {}).get('turns', [])
+    last_question = next((turn.get('customer', '') for turn in reversed(turns) if not re.fullmatch(r'[?？!\s]+', turn.get('customer', ''))), '')
+    if tracking_definition(text) or bare_question and tracking_definition(last_question):
+        body = ('Поясню простіше. ' if bare_question else '') + 'ТТН — це номер накладної Нової пошти. За ним можна відстежувати посилку й отримати її. Номер замовлення — це наш окремий номер покупки.'
+        ttn = str(saved.get('parcel', {}).get('ttn', ''))
+        if re.fullmatch(r'\d{14}', ttn) and saved.get('parcel', {}).get('status') != 'cancelled':
+            body += '\nВаша ТТН: ' + ttn
+        return reply(body)
+
+    if wants_dispatch_notice(raw) and not flags.intersection({'cancel', 'complaint'}):
+        parcel = saved.get('parcel', {})
+        if parcel.get('status') == 'cancelled':
+            return reply('Це відправлення скасоване. Якщо потрібна допомога з новим замовленням, пишіть.')
+        if can_watch_shipment(saved, raw):
+            ttn = shipped_waybill(parcel)
+            if ttn:
+                return reply('Посилку вже відправлено. Ваша ТТН — ' + ttn + '.', updates={'shipment_notice_announced': ttn})
+            return reply('Добре, напишу сюди після відправлення й надішлю ТТН',
+                         updates={'shipment_notice_invoice': saved['invoice_id']})
+        if saved.get('checkout_method') == 'olx' or saved.get('olx_notice_received'):
+            return reply('Статус відправлення з’явиться в деталях замовлення OLX. Його можна перевірити там.')
+        return reply('У цьому чаті поки немає прив’язаної накладної для цієї покупки. Якщо у вас уже є ТТН, за нею можна перевірити статус у застосунку перевізника.')
+
+    if re.search(r'(?:напиш|повідом|сообщ|дайте\s+знати).{0,35}(?:коли|когда).{0,25}(?:при[їе]д|при[їе]х|прийд|прибуд|достав)', text):
+        if saved.get('parcel', {}).get('status') == 'cancelled':
+            return reply('Це відправлення скасоване, тому прибуття за цією накладною не очікується.')
+        if not saved.get('invoice_issued') and not saved.get('parcel', {}).get('ttn') and not saved.get('olx_notice_received'):
+            return reply('Підкажіть, йдеться про прибуття вашої посилки чи про надходження товару в наявність?')
+        if saved.get('checkout_method') == 'olx' or saved.get('olx_notice_received'):
+            return reply('Коли посилка приїде, цей статус з’явиться в деталях замовлення OLX.')
+        ttn = str(saved.get('parcel', {}).get('ttn', ''))
+        if re.fullmatch(r'\d{14}', ttn):
+            return reply('Прибуття можна перевірити в застосунку Нової пошти за вашою ТТН ' + ttn + '. Там буде актуальний статус посилки.')
+        return reply('Коли накладна буде готова, надішлю ТТН окремим повідомленням. За нею можна буде перевірити прибуття посилки в застосунку перевізника.')
+
+    if re.search(r'(?:який|какой|де|где|скинь|надішл|напиш).{0,20}номер\s+(?:замов|заказ)', text) and not re.search(r'ттн|накладн', text):
+        number = saved.get('invoice_id')
+        return reply('Ваше замовлення №' + number if number else 'Замовлення ще не оформлене, тому номера поки немає. Після оформлення надішлю його вам.')
+
+    delivery = delivery_plan(catalog, raw, saved, now)
+    if delivery is not None:
+        return delivery
+
+    degree_question = r'(?:(?:а|і|прям|прямо|аж)\s+)*(?:дуже|сильно|очень)[?!. ]*'
+    if product and saved.get('product') == product['key'] and saved.get('size') and re.fullmatch(degree_question, text):
+        previous = next((turn for turn in reversed(turns) if not re.fullmatch(degree_question, canonical(turn.get('customer', '')))), {})
+        size = saved['size']
+        if 'sizing' in intents(previous.get('customer', '')) and re.search(r'вам\s+підійде\s+' + re.escape(size) + r'\b', previous.get('answer', ''), re.I):
+            measures, _ = measurements_reply(product, [size])
+            body = f'За вашими параметрами я б радив {size}. Якщо хочете звірити посадку, порівняйте його заміри з річчю, яку вже носите.'
+            return reply(body + ('\n\n' + measures if measures else ''))
+
+    if not has_attachments and flags <= {'greeting', 'photos', 'availability'} and 'photos' in flags:
+        from advert_knowledge import PHOTOS_NOTICE
+        return reply(PHOTOS_NOTICE)
+
+    if re.search(r'\b(?:відгук\w*|отзыв\w*|відзив\w*)\b', text) and '?' in text and not flags.intersection({'order', 'complaint'}):
+        return reply('Відгуки про продавця можна переглянути в профілі OLX. Щодо цієї моделі можу підказати склад, заміри й посадку.')
+
+    if re.fullmatch(r'(?:а\s+)?(?:через|по|на)?\s*(?:нов\w*\s+пошт\w*|нов\w*\s+почт\w*|нп)[?!. ]*', text):
+        return reply('Так, відправляємо Новою поштою.')
+
     if (saved.get('invoice_issued') and not has_attachments and
-            re.search(r'(?:скільки|сколько|яку\s+суму|какую\s+сумму).{0,25}(?:оплат|сплат|плат|переказ|перевес)',text)):
+            re.search(r'(?:скільки|сколько|яку\s+суму|какую\s+сумму).{0,25}(?:оплат|сплат|плат|переказ|перевес)|(?:повн\w*|полн\w*)\s+сум\w*.{0,30}(?:передоплат|предоплат)',text)):
         order=snapshot(catalog,saved)
         amount=order.get('amount')
         if amount is not None and order.get('method') in ('cod','full'):
@@ -49,7 +119,6 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
 
     if re.fullmatch(r'(?:а\s+)?(?:буде|будуть|появиться|появятся)[?!. ]*',text):
         previous=saved.get('conversation_memory',{}).get('turns',[])
-        from customer_language import intents
         if saved.get('pending_alternatives') or previous and 'availability' in intents(previous[-1].get('customer','')):
             return reply('Підтвердженої дати надходження поки немає. Можу перевірити інший колір або розмір.')
 
@@ -59,28 +128,10 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
                   if product and product.get('waist_measurement_kind') == 'flat_width' else '')
         return reply(method + 'Точну точку вимірювання у верхній частині виробу в описі не уточнено, тому не хочу ввести вас в оману.')
 
-    if (not saved.get('invoice_issued') and 'delivery' in flags and
-            not flags.intersection({'dispatch','arrival','cancel','returns'}) and
-            ('?' in text or re.search(r'\bчи\b|можна|можно|відправляєте|отправляете',text)) and
-            re.search(r'\b(?:олх|олікс|olx)\b', text) and not cod_mentioned(text) and
-            not re.search(r'передоплат|предоплат|повн\w*\s+оплат|100\s*грн',text)):
-        return reply('Так, відправляємо OLX Доставкою. Оформлення й оплата — у самому OLX.')
-
     if (not saved.get('invoice_issued') and not cod_deposit_question(text,saved) and
             re.search(r'(?:яка|какая|скільки|сколько|який\s+розмір).{0,20}(?:передоплат|передплат|предоплат)',text) and
             not re.search(r'повн\w*|полн\w*|олх|olx',text)):
         return reply('Для післяплати передоплата — 100 грн. Вона входить у вартість товару: решту сплачуєте при отриманні. Доставка оплачується окремо.')
-
-    if (re.search(r'(?:розрахув|рассчит|оплат|сплат|заплат).{0,30}(?:отриман|получен|відділен|віділен|отделен|пошті|почте)|'
-                  r'(?:отриман|получен|відділен|віділен|отделен|пошті|почте).{0,30}(?:розрахув|рассчит|оплат|сплат|заплат)', text) and
-            not saved.get('invoice_issued')):
-        explanation = ('Так, можна післяплатою. Передоплата — 100 грн, решту за товар сплачуєте при отриманні. Доставка оплачується окремо.'
-                       if not carrier_enabled(catalog.shop) else
-                       'Так, товар можна оплатити при отриманні. Перед відправленням потрібно оплатити доставку Новій пошті за ТТН.')
-        items = saved.get('cart') or [saved]
-        complete = all(all(row.get(key) for key in ('product','size','color')) for row in items)
-        return reply(explanation + (' Оформлюємо так?' if complete else ''),
-                     updates={'pending_checkout_method':'cod', 'checkout_offered':True} if complete else None)
 
     if not has_attachments and re.search(r'(?:дані|данные).{0,25}(?:сюди|сюда|вам|казати|писати|надсилати|отправ)|'
                                          r'(?:що|шо|что|які|какие).{0,15}(?:писати|дані|данные|надсилати)', text):
@@ -108,7 +159,8 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
             return reply(*answer)
         if direct_delivery(saved) and flags.intersection({'dispatch','arrival'}):
             return None
-        if re.fullmatch(r'(?:давай(?:те)?\s+)?(?:по\s+)?(?:пп|фоп|передоплат\w*|предоплат\w*)[.!? ]*', text):
+        from checkout import method_choice
+        if re.fullmatch(r'(?:давай(?:те)?\s+)?(?:по\s+)?(?:пп|фоп|передоплат\w*|предоплат\w*)[.!? ]*', text) and not method_choice(text, saved.get('pending_checkout_method') or saved.get('checkout_method')):
             return reply('Обираєте повну оплату товару за реквізитами чи післяплату з оплатою доставки Новій пошті за ТТН?')
 
     if re.fullmatch(r'(?:а?л[лоьо]+|ау(?:\s+брат)?|ну+|(?:ну\s+)?(?:що|шо|что)(?:\s+там)?|[?!.]+)[?!. ]*', text):
@@ -141,20 +193,6 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
         if facts.get('photo_model'):
             return reply(facts['photo_model'])
         return reply('Розмір і параметри людини на фото уточню у власника. Для вашого підбору можемо орієнтуватися на заміри саме цієї моделі.', True)
-    unknown_facts = [
-        (r'бірк|бирк|етикет|этикет|ярлик|ярлык', 'tags', 'наявність і вигляд бірок'),
-        (r'\bgsm\b|\bгсм\b|щільніст|плотност|ваг\w*\s+(?:штан|футбол|вироб)|вес\w*\s+(?:штан|футбол)', 'density', 'щільність тканини й вагу виробу'),
-        (r'прат|пранн|стират|стирк|прасув|гладит|линя|сіда\w*\s+після|сядут', 'care', 'правила догляду за цією моделлю'),
-        (r'в\s+комплект|у\s+комплект|що\s+в\s+упаков|что\s+в\s+упаков', 'package', 'комплектацію цієї моделі'),
-    ]
-    for pattern, key, label in unknown_facts:
-        if re.search(pattern, text) and not flags.intersection({'complaint', 'returns'}):
-            if key == 'care' and flags.intersection({'pilling','print'}) and not re.search(r'як\s+прати|как\s+стирать|температур.{0,12}(?:пран|стир)|режим.{0,12}(?:пран|стир)', text):
-                continue
-            if facts.get(key) and isinstance(facts[key], str):
-                return reply(facts[key])
-            known = facts.get('material', '') + ' ' if 'material' in flags and facts.get('material') else ''
-            return reply(known + 'Уточню для вас %s, щоб відповісти точно.' % label, True)
     full_payment = saved.get('checkout_method') == 'full' or ('olx' not in text and 'олх' not in text and bool(re.search(r'повн\w*\s+(?:передоплат|оплат)|полн\w*\s+(?:предоплат|оплат)', text)))
     deposit_question = cod_deposit_question(text, saved)
     if not deposit_question and full_payment and re.search(r'повер|верта|возвра|верн|відмовлю|відмова|откажусь|отказ|не\s+заберу', text):
@@ -171,9 +209,39 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
         return reply(COD_WITHOUT_PREPAYMENT)
     if deposit_question == 'purpose':
         return reply(COD_DEPOSIT_PURPOSE)
-    if re.fullmatch(r'(?:давай(?:те)?\s+)?(?:по\s+)?(?:пп|фоп|передоплат\w*|предоплат\w*)[.!? ]*', text):
+    from checkout import asks_payment_method, method_choice, method_terms, method_with_side_question, payment_signature
+    if not saved.get('invoice_issued') and not has_attachments:
+        advance = r'(?:передоплат|передплат|предоплат)\w*'
+        deduction = r'(?:віднім|відніма|відрах|вычит|вход)\w*'
+        if re.search(advance + r'.{0,35}' + deduction + '|' + deduction + r'.{0,35}' + advance, text):
+            if carrier_enabled(catalog.shop):
+                return reply('За післяплати доставку оплачуєте Новій пошті окремо за ТТН. За товар сплачуєте при отриманні.')
+            return reply('Так, передоплата 100 грн входить у ціну товару. При отриманні сплачуєте решту за товар і доставку.')
+        method = method_choice(text)
+        if method is None and re.search(r'(?:розрахув|рассчит|оплат|сплат|заплат).{0,30}(?:отриман|получен|відділен|віділен|отделен|пошті|почте)|(?:отриман|получен|відділен|віділен|отделен|пошті|почте).{0,30}(?:розрахув|рассчит|оплат|сплат|заплат)', text):
+            method = 'cod'
+        if (method in ('cod', 'full', 'olx') and asks_payment_method(text) and not method_with_side_question(raw) and
+                not flags.intersection({'arrival', 'cancel', 'complaint', 'returns', 'shipment_status'}) and
+                not re.search(r'знижк|скидк|дешевш|дешевле|торг', text)):
+            items = saved.get('cart') or [saved]
+            complete = all(all(row.get(key) for key in ('product', 'size', 'color')) for row in items)
+            updates = {'pending_checkout_method': method}
+            if complete:
+                updates['checkout_offered'] = True
+            return reply(method_terms(catalog, method) + (' Оформлюємо так?' if complete else ''), updates=updates)
+    if re.fullmatch(r'(?:давай(?:те)?\s+)?(?:по\s+)?(?:пп|фоп|передоплат\w*|предоплат\w*)[.!? ]*', text) and not method_choice(text, saved.get('pending_checkout_method') or saved.get('checkout_method')):
         return reply('Уточніть, будь ласка: передоплата 100 грн і решта при отриманні чи повна оплата товару?')
     if saved.get('invoice_issued') and not has_attachments and not direct_delivery(saved):
+        same = r'(?:та\s+сама|той\s+самий|такая\s+же|та\s+же|также\s+сама|т[еі]\s+сам[іи]|не\s+змінювал)'
+        account = r'(?:карт|рахун|сч[её]т|реквіз|реквиз)\w*'
+        if re.search(same + r'.{0,20}' + account + '|' + account + r'.{0,20}' + same, text):
+            if saved.get('payment_verified'):
+                return reply('Оплату за цим замовленням уже підтверджено. Повторно переказувати кошти не потрібно.')
+            if saved.get('receipt_submitted') or saved.get('payment_reported'):
+                return reply('Оплату за цим замовленням перевіряємо. Повторно переказувати кошти не потрібно.')
+            if merchant and saved.get('invoice_payment_signature') == payment_signature(merchant):
+                return reply('Так, реквізити для цього замовлення ті самі, що надіслав вище.')
+            return reply('Реквізити для цього замовлення потрібно звірити. Поки утримайтеся від переказу.')
         if re.search(r'\bбанк\w*|приват|монобанк|\bмоно\b|privat|monobank', text):
             bank = 'monobank' if merchant.get('_monobank') else merchant.get('bank_name')
             return reply('Банк отримувача — ' + bank + '.' if bank else 'Назву банку отримувача уточню у власника. Реквізити вашого замовлення залишаються ті самі.', not bool(bank))
@@ -183,7 +251,8 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
             if saved.get('checkout_method') == 'cod' and saved.get('bank_payment') and merchant.get('_monobank') and saved['bank_payment'].get('scope') == merchant['_monobank'].get('scope'):
                 return reply('Так, надішліть фото або скріншот квитанції в цей чат. Надходження також перевіримо через mono; повторно оплачувати не потрібно.')
             return reply('Так, надішліть, будь ласка, фото або скриншот квитанції в цей чат. Саме надходження коштів перевіримо окремо.')
-        if re.fullmatch(r'(?:(?:ок|все|всьо|всьо гроші|я|вже|уже|кошти|гроші)\s*[, ]*\s*)*(?:скину[вл][а]?|закинув|закинула|перекинув|перекинула|переказав|переказала|перев[еі]в|перевела)[.! ]*', text):
+        transfer = re.sub(r'(?:[, .]+(?:тд|добр(?:ий|ого)\s+(?:день|дня)|привіт))+[!., ]*$', '', text)
+        if re.fullmatch(r'(?:(?:ок|все|всьо|всьо гроші|я|вже|уже|кошти|гроші)\s*[, ]*\s*)*(?:скину[вл][а]?|закинув|закинула|перекинув|перекинула|переказав|переказала|перев[еі]в|перевела)[.! ]*', transfer):
             return reply('Дякую, що повідомили! Перед відправкою звіримо надходження коштів.', updates={'payment_reported': True})
         if re.fullmatch(r'(?:прийшли|прийшло|прийшла|пришли|дійшли|дошли|отримали)[?!. ]*', text):
             return reply('Надходження коштів звіримо перед відправкою. Повторно оплачувати не потрібно.')
@@ -208,9 +277,12 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
     if 'arrival' in flags:
         if saved.get('parcel', {}).get('status') == 'cancelled':
             return reply('Це оформлення скасоване. Якщо бажаєте, допоможу оформити нове замовлення.')
-        dispatched = saved.get('parcel', {}).get('ledgerly_status') == 'shipped'
-        intro = 'Посилку вже відправлено.' if dispatched else shipping_reply(catalog.shop, now)
-        return reply(intro + ' Точний день прибуття залежить від перевізника. Доставку до конкретної години чи дня не можу гарантувати.', calendar=not dispatched)
+        ttn = str(saved.get('parcel', {}).get('ttn', ''))
+        if re.fullmatch(r'\d{14}', ttn):
+            return reply('Актуальний статус і прогноз прибуття можна перевірити в застосунку Нової пошти за ТТН ' + ttn + '.')
+        if saved.get('checkout_method') == 'olx' or saved.get('olx_notice_received'):
+            return reply('Статус посилки можна перевірити в деталях замовлення OLX. Точний час прибуття залежить від перевізника.')
+        return reply('Термін у дорозі залежить від перевізника й населеного пункту. Доставку до конкретного дня не можу гарантувати. Коли буде ТТН, за нею можна перевірити прогноз прибуття.')
     if re.search(r'(?:скільки|сколько|вартіст|кошту|стоит|ц[іе]н).{0,25}(?:достав|пересил|пересыл)|'
                  r'(?:достав|пересил|пересыл).{0,25}(?:скільки|сколько|вартіст|кошту|стоит|ц[іе]н)', text):
         return reply(catalog.shop.get('delivery_cost') or 'Вартість доставки визначає перевізник під час оформлення. Вона оплачується окремо від вартості товару.')
@@ -218,12 +290,27 @@ def question_plan(catalog, merchant, raw, saved, advert, flags, now=None, has_at
         if saved.get('parcel', {}).get('ledgerly_status') == 'shipped' or saved.get('parcel', {}).get('status') == 'cancelled':
             return None
         return reply(shipping_reply(catalog.shop, now) + ' Точну годину відправлення поки не обіцяю.', calendar=True)
+    unknown_facts = [
+        (r'бірк|бирк|етикет|этикет|ярлик|ярлык', 'tags', 'наявність і вигляд бірок'),
+        (r'\bgsm\b|\bгсм\b|щільніст|плотност|ваг\w*\s+(?:штан|футбол|вироб)|вес\w*\s+(?:штан|футбол)', 'density', 'щільність тканини й вагу виробу'),
+        (r'прат|пранн|стират|стирк|прасув|гладит|линя|сіда\w*\s+після|сядут', 'care', 'правила догляду за цією моделлю'),
+        (r'в\s+комплект|у\s+комплект|що\s+в\s+упаков|что\s+в\s+упаков', 'package', 'комплектацію цієї моделі'),
+    ]
+    for pattern, key, label in unknown_facts:
+        if re.search(pattern, text) and not flags.intersection({'complaint', 'returns'}):
+            if key == 'care' and flags.intersection({'pilling','print'}) and not re.search(r'як\s+прати|как\s+стирать|температур.{0,12}(?:пран|стир)|режим.{0,12}(?:пран|стир)', text):
+                continue
+            if facts.get(key) and isinstance(facts[key], str):
+                return reply(facts[key])
+            known = facts.get('material', '') + ' ' if 'material' in flags and facts.get('material') else ''
+            return reply(known + 'Уточню для вас %s, щоб відповісти точно.' % label, True)
     if re.search(r'зустр[іе]т|встрет|самовив|самовыв|під.їхат|под.ехать|можу.{0,15}забрати|район[іе]\b', text):
         policy = catalog.shop.get('pickup')
         return reply(policy if isinstance(policy, str) and policy else 'Можливість зустрічі або самовивозу потрібно узгодити з власником. Передам йому ваш запит.', not bool(policy))
     if re.search(r'ви\s+зв[іи]дки|вы\s+откуда|якого\s+міста|звідки\s+відправ|откуда\s+отправ', text):
         city = catalog.shop.get('dispatch_city')
-        return reply('Відправляємо з міста ' + city + '.' if isinstance(city, str) and city else 'Місто відправлення уточню у власника.', not bool(city))
+        return reply('Відправляємо з міста ' + city + '.' if isinstance(city, str) and city else
+                     'Поки не маю підтвердженого міста відправлення. Якщо вас цікавить самовивіз, напишіть, де вам зручно забрати товар.')
     if re.search(r'(?:коли|когда).{0,30}(?:будуть|буде|будут|будет|поставк|надходж)|'
                  r'(?:поставк|надходж).{0,20}(?:при[їе]х|буд)|(?:напиш|повідом).{0,25}(?:появ|з.яв|буд)', text) and 'dispatch' not in flags:
         return reply('Підтвердженої дати нового надходження поки не маю. Можу перевірити інший розмір або колір, який підійде вам зараз.')

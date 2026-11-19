@@ -28,7 +28,7 @@ def contents_description(items):
         name = str(item.get('name', '')).casefold()
         kind = 'Штани' if re.search(r'штан|брюк|pants', name) else 'Футболка' if re.search(r'футбол|t.?shirt|tee', name) else str(item.get('name', 'Товар'))
         kind = re.sub(r'[\x00-\x1f\x7f]', '', kind).strip()
-        value = ', '.join(str(v) for v in (kind, item.get('size'), colors.get(item.get('color'), item.get('color'))) if v)
+        value = ', '.join(str(v) for v in (kind, (str(item.get('requested_size')) + '*' if item.get('size_substituted') else item.get('size')), colors.get(item.get('color'), item.get('color'))) if v)
         if value not in parts:
             parts.append(value)
     description = '; '.join(parts)

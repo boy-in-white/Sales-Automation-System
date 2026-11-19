@@ -2,7 +2,6 @@
 
 import re
 
-from catalog import normalize
 from customer_phrasing import canonical, cod_mentioned, customer_greeting
 
 
@@ -23,6 +22,8 @@ def parameters(text, context, weight_for_fit=True):
     bridge = r"\s*[:=—-]?\s*(?:(?:у|в)\s+(?:мене|меня)\s*)?(?:становить\s*)?"
     patterns["height"][0] = r"(?:зріст|зростом|зросту|рост|ростом|ріст)" + bridge + number
     patterns["weight"][0] = r"(?:вага|вагу|ваги|важу|вес|вешу|весом)" + bridge + number
+    patterns['height'].insert(1, number + r'\s*(?:зріст|зростом|ріст|рост|ростом)(?!\w)')
+    patterns['weight'].insert(1, number + r'\s*(?:вага|ваги|вагою|вес|весом)(?!\w)')
     interval = re.search(r'(?:зріст|зростом|зросту|рост|ростом|ріст)\s*(?:(?:від|от)\s*)?' + number +
                          r'\s*(?:[-–—−]|до)\s*' + number, text)
     if not interval and context.get('awaiting') in ('height','parameters'):
@@ -69,8 +70,10 @@ def parameters(text, context, weight_for_fit=True):
         if 3 <= h < 120 and 120 <= w <= 230:
             h, w = w, h
         result = {"height": round(h * 100, 2) if h < 3 else h, "weight": w}
-    if not result and re.fullmatch(number + r"[.!]?", text) and context.get("awaiting") in ("height", "weight", "parameters"):
+    if not result and re.fullmatch(number + r"[.!]?", text) and context.get("awaiting") in ("height", "weight", "parameters", "size", "cart_size"):
         value = float(text.rstrip(".!").replace(",", "."))
+        if context.get("awaiting") in ("size", "cart_size") and not (120 <= value <= 230 or 1.2 <= value <= 2.3):
+            return result, errors
         if context.get("awaiting") == "weight":
             result["weight"] = value
         elif context.get("awaiting") == "height":
@@ -230,9 +233,15 @@ def intents(text):
         "order": r"замов|заказ|оформ|\bберу\b|заберу|хочу\s+(?:(?:ще|також)\s+)?(?:куп|штан|футбол|брюк|чорн|черн|сір|сер|біл|бел|suvene|gallery)|куплю|(?:можна|можно|готов).{0,12}(?:купити|купить)",
         "cancel": r"(?:^|\s)не\s+(?:треба|потрібно|нужно|хочу|надо)[.!]?\s*$|скасу\w*\s+замов|отмен\w*\s+заказ|неактуаль|(?:передумав|передумала|передумал|передумали)\s+(?:замовляти|купувати|заказывать|брати|брать)|не\s+(?:буду|хочу)\s+(?:замовляти|купувати|заказывать|брати|брать)",
         "thanks": r"дяку|спасиб|благодар|^\s*(?:красавчик|красавец|молодець|молодец|красава|ти\s+топ|ви\s+топ)[!.,🙂😊 ]*$",
-        "complaint": r"скарг|жалоб|обман|повреж|пошкод|не\s+прийш|не\s+приш|де\s+мо[єя]|где\s+мо[йяе]|номер\s+(?:замов|заказ)|статус\s+(?:замов|заказ)|оператор|жив[ао]й\s+(?:людин|человек)",
+        "complaint": r"скарг|жалоб|обман|повреж|пошкод|не\s+прийш|не\s+приш|оператор|жив[ао]й\s+(?:людин|человек)",
     }
     found = {name for name, pattern in patterns.items() if re.search(pattern, text)}
+    if re.search(r'(?:номер|статус)\s+(?:замов|заказ)|де\s+мо[єя]\s+(?:замов|посил)|где\s+мо[йяе]\s+(?:заказ|посыл)', text):
+        found.add('shipment_status')
+    if re.search(r'\b(?:що|шо|что|як|как)\s+(?:там\s+)?(?:з|із|с)\s+(?:відправкою|отправкой|посилкою|посылкой)\b', text):
+        found.add('shipment_status')
+    if re.search(r'(?:скільки|сколько).{0,30}(?:їхат|ехать|іти|идти|у\s+дорозі|в\s+пути)', text):
+        found.add('arrival')
     if re.search(r'(?:завтра|сьогодні|сегодня).{0,40}(?:при[їе]ха|отримат|получит|доставил)', text):
         found.add('arrival')
     if standalone_cancel:
@@ -241,6 +250,8 @@ def intents(text):
         found.add('greeting')
     if cod_mentioned(text):
         found.update(("delivery", "payment"))
+    if re.search(r'\b(?:на|по|через)\s+укр\b', text):
+        found.add('delivery')
     if re.search(r"розмірн\w*\s+с[іе]тк|размерн\w*\s+сетк|мірн\w*\s+сітк", text):
         found.add("measurements")
     if re.search(r"(?:передоплат|передплат|предоплат).{0,45}(?:верта|повер|возвра|верн)|(?:верта|повер|возвра|верн).{0,45}(?:передоплат|передплат|предоплат)", text):

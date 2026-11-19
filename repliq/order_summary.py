@@ -72,7 +72,7 @@ def confirmation_key(order):
     return digest([invoice_key(order), order["shipping"]])
 
 
-def summary(order, shipping=True, reference=True, payment=True):
+def summary(order, shipping=True, reference=True, payment=True, internal=False):
     lines = []
     if order["id"] and reference:
         lines.append("Замовлення №" + order["id"])
@@ -84,6 +84,8 @@ def summary(order, shipping=True, reference=True, payment=True):
             parts.append(COLORS.get(item["color"], item["color"]))
         parts.append("%s шт." % item["quantity"])
         lines.append("• " + ", ".join(parts))
+        if internal and item.get("size_substitution"):
+            lines.append("  Замовлено " + item["size"] + " → відправити " + item["stock_size"] + " · позначка ТТН: " + item["size"] + "*")
     if order["total"] is not None:
         lines.append("Разом за товари: %s грн." % order["total"])
     if order["method"] and payment:

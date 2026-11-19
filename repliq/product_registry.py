@@ -97,7 +97,10 @@ class Registry:
         allowed = ({'measurements','garment_measurements'} if mode=='measurements' else
                    {'sizing_basis','height_guidance','size_chart_verified','sizes'} if mode=='guide' else
                    {'description'} if mode=='description' else
+                   {'size_substitution_enabled'} if mode=='size_substitution' else
                    {'facts'} if mode.startswith('fact:') and mode[5:] in EDITABLE_FACTS else set())
+        if mode == "size_substitution" and type(patch.get("size_substitution_enabled")) is not bool:
+            return False
         if not allowed or set(patch) != allowed or type(revision) is not int:
             return False
         if mode.startswith('fact:') and (not isinstance(patch.get('facts'), dict) or set(patch['facts']) != {mode[5:]}):
@@ -168,9 +171,15 @@ class Registry:
             db.execute("INSERT OR IGNORE INTO admin_jobs VALUES(?,?,?,?,?,'queued',?)",
                        (key, self.account, owner, action, json.dumps(payload, ensure_ascii=False), time.time()))
 
-    def next_job(self):
+    def next_job(self, allowed=None, claim=False):
         with self.store.db() as db:
-            row = db.execute("SELECT * FROM admin_jobs WHERE account=? AND status='queued' ORDER BY created LIMIT 1", (self.account,)).fetchone()
+            if claim:
+                db.execute('BEGIN IMMEDIATE')
+            condition = " AND action IN (" + ','.join('?' for _ in allowed) + ")" if allowed else ""
+            args = [self.account] + list(allowed or [])
+            row = db.execute("SELECT * FROM admin_jobs WHERE account=? AND status='queued'" + condition + " ORDER BY created LIMIT 1", args).fetchone()
+            if row and claim:
+                db.execute("UPDATE admin_jobs SET status='working' WHERE event_key=? AND status='queued'", (row['event_key'],))
         return dict(row, payload=json.loads(row["payload"])) if row else None
 
     def finish(self, key, status="done"):

@@ -37,7 +37,7 @@ def entry(text, saved, product=None, has_attachments=False):
     cancelled_order = saved.get('parcel', {}).get('status') == 'cancelled'
     new_purchase = explicit_new or repeat_purchase and finished_order
     settled_order = saved.get('payment_verified') or saved.get('parcel', {}).get('ledgerly_status') in ('shipped','cancelled') or cancelled_order
-    restart = not has_attachments and (new_purchase or pure_greeting and settled_order or help_requested and finished_order or
+    restart = not has_attachments and (new_purchase or (pure_greeting or help_requested) and settled_order or
                                       cancelled_order and bool(flags.intersection({'order','availability','sizing'})))
     context = fresh_selection(saved, product) if restart else copy.deepcopy(saved)
     if pure_greeting and saved.get('invoice_issued') and not restart:
@@ -54,6 +54,9 @@ def entry(text, saved, product=None, has_attachments=False):
         return {"text": "Звісно! Який товар, розмір і колір бажаєте цього разу?", "context": context,
                 "on_send": {"awaiting": "size"}, "guard": {"archive_order": True}, "notes": []}
     if help_requested:
+        if saved.get('invoice_issued') and not restart:
+            return {'text': 'Звісно, допоможу. Підбираєте інший розмір для цього замовлення чи цікавить ще одна річ?',
+                    'context': context, 'on_send': {}, 'guard': {}, 'notes': []}
         context.update(awaiting="parameters", topic="sizing", size_advice_requested=True)
         return {"text": "Звісно, допоможу 🙂 Напишіть ваш зріст та вагу — підберемо розмір. Якщо цікавить щось інше про товар, також запитуйте", "context": context,
                 "on_send": {"awaiting": "parameters"}, "guard": {"archive_order": True} if restart else {}, "notes": []}

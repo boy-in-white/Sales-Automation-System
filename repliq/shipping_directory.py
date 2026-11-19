@@ -11,12 +11,15 @@ from pathlib import Path
 
 from app import read_json, AppError
 from nova_shipping import NovaShipping, CarrierError, normalized
+from customer_contact import clean_place
 
 FIELDS = ("name", "phone", "place", "branch")
 
 
 def details_key(details):
     value = [str(details.get(key, "")).strip() for key in FIELDS]
+    if details.get('place_type'):
+        value.append(details['place_type'])
     return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -39,6 +42,17 @@ def branch_label(row):
 def city_names(row):
     names = [str(row.get(key, "")) for key in ("Description", "DescriptionRu")]
     return [normalized(name) for value in names for name in (value, re.sub(r"\s*\([^)]*\)", "", value)) if name]
+
+
+def city_type(row):
+    value = normalized(row.get('SettlementTypeDescription') or row.get('SettlementTypeDescriptionRu') or '')
+    if value in ('місто', 'город'):
+        return 'місто'
+    if value == 'село':
+        return value
+    if value.startswith('селищ') or value == 'смт':
+        return 'селище'
+    return ''
 
 
 class ShippingDirectory:
@@ -69,7 +83,8 @@ class ShippingDirectory:
             raise CarrierError("directory_timeout")
         client.timeout = min(3, remaining)
         rows = client.call("Address", method, props)
-        fields = ("Ref", "Description", "DescriptionRu", "AreaDescription", "AreaDescriptionRu", "RegionsDescription", "CityRef", "Number", "CategoryOfWarehouse", "WarehouseStatus")
+        fields = ("Ref", "Description", "DescriptionRu", "AreaDescription", "AreaDescriptionRu", "RegionsDescription",
+                  'SettlementTypeDescription', 'SettlementTypeDescriptionRu', "CityRef", "Number", "CategoryOfWarehouse", "WarehouseStatus")
         rows = [{key: row[key] for key in fields if key in row} for row in rows]
         self.cache[key] = (time.monotonic() + 600, copy.deepcopy(rows))
         self.cache.move_to_end(key)
@@ -84,14 +99,14 @@ class ShippingDirectory:
         options = rows[:3]
         heading = ("Уточніть, будь ласка, населений пункт — у довіднику Нової пошти є такі варіанти:" if kind == "city" else
                    "За цим номером не можу однозначно вибрати адресу. Можливо, ви мали на увазі:")
-        labels = [city_label(r) if kind == "city" else str(r.get("Description") or branch_label(r)) for r in options]
+        labels = [(city_type(r) + ' ' + city_label(r)).strip() if kind == 'city' else str(r.get('Description') or branch_label(r)) for r in options]
         prompt = heading + "\n" + "\n".join("%s. %s" % (i + 1, label) for i, label in enumerate(labels))
         prompt += "\nНапишіть номер правильного варіанта або повністю вкажіть потрібну адресу."
         return {"status": "choice", "kind": kind, "key": details_key(details), "options": options, "prompt": prompt, "details": copy.deepcopy(details)}
 
     def review(self, details, pending=None, text=""):
         self.deadline = time.monotonic() + 6
-        details = {k: copy.deepcopy(v) for k, v in details.items() if k in FIELDS or k == "city_ref"}
+        details = {k: copy.deepcopy(v) for k, v in details.items() if k in FIELDS or k in ('city_ref', 'place_type')}
         if (pending and pending.get("key") == details_key(details) and (pending.get("status") == "city" or pending.get("kind") == "city")
                 and re.search(r"область|\bобл\.?|район|р-н|(?:ська|цька|ский|ская)$", text, re.I)
                 and not re.search(r"місто\s*[:—]|город\s*[:—]|село\s*[:—]|телефон|поштомат|відділення", text, re.I)
@@ -113,7 +128,7 @@ class ShippingDirectory:
     def _review(self, details, selected):
         original = dict(details)
         client = self.client()
-        parts = [p.strip() for p in details["place"].split(",") if p.strip()]
+        parts = [p.strip() for p in clean_place(details["place"]).split(",") if p.strip()]
         name = re.sub(r"^(?:м\.?|місто|город|с\.?|село|смт\.?|селище)\s+", "", parts[0], flags=re.I)
         rows = self.read(client, "getCities", {"FindByString": name, "Page": "1", "Limit": "100"})
         if not rows and len(name) >= 4:
@@ -125,9 +140,17 @@ class ShippingDirectory:
         matches = exact
         area = normalized(" ".join(parts[1:]))
         if area:
-            tokens = [normalized(p) for p in re.split(r"[\s,]+", " ".join(parts[1:])) if normalized(p) not in ("область", "обл", "район", "рн")]
+            tokens = [normalized(p) for p in re.split(r'[\s,]+', ' '.join(parts[1:]))
+                      if not re.fullmatch(r'(?:обл(?:асть|асті|асти)?|район(?:у|а|і|е)?|рн)?', normalized(p))]
             matches = [r for r in exact if all(token in normalized(city_label(r)) or
                        max(SequenceMatcher(None, token, normalized(r.get(k))).ratio() for k in ("AreaDescription", "AreaDescriptionRu", "RegionsDescription")) >= .83 for token in tokens)]
+        kind = details.get('place_type')
+        if kind and len(matches) > 1:
+            typed = [r for r in matches if city_type(r) == kind]
+            if typed:
+                matches = typed
+        elif kind and matches and city_type(matches[0]) not in ('', kind) and not selected and not details.get('city_ref'):
+            return self.choices('city', matches, details)
         if selected and selected[0] == "city":
             matches = [selected[1]]
         elif details.get("city_ref"):
@@ -147,6 +170,11 @@ class ShippingDirectory:
         matches = [r for r in rows if working(r) and str(r.get("Number")) == number[0]]
         if selected and selected[0] == "branch":
             matches = [r for r in [selected[1]] if working(r)]
+        elif any(details['branch'].startswith('Поштомат') != branch_label(r).startswith('Поштомат') for r in matches):
+            matching_type = [r for r in matches if details['branch'].startswith('Поштомат') == branch_label(r).startswith('Поштомат')]
+            if not matching_type:
+                return self.choices('branch', matches, original)
+            matches = matching_type
         if len(matches) != 1:
             if not matches and len(number[0]) >= 2:
                 near = self.read(client, "getWarehouses", {"CityRef": city["Ref"], "FindByString": number[0][:-1], "Page": "1", "Limit": "100"})
@@ -159,5 +187,6 @@ class ShippingDirectory:
         branch = matches[0]
         canonical = dict(details, place=city_label(city), branch=branch_label(branch), city_ref=city["Ref"],
                          warehouse_ref=branch["Ref"], branch_address=str(branch.get("Description") or branch_label(branch))[:500])
+        canonical.pop('place_type', None)
         return {"status": "ready", "details": canonical, "key": details_key(canonical),
                 "corrected": any(canonical[k] != original[k] for k in ("place", "branch"))}

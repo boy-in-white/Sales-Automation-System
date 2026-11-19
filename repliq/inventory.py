@@ -16,11 +16,12 @@ class StockUnavailable(Exception):
 def stock_rows(inventory, product):
     """Local sales restrictions never change the shared Ledgerly inventory."""
     excluded = set(product.get("excluded_sizes", []))
-    return [row for row in inventory.rows(product) if row["size_code"] not in excluded]
+    from size_fulfillment import sales_rows
+    return sales_rows([row for row in inventory.rows(product) if row["size_code"] not in excluded], product)
 
 
 def stock_signature(rows):
-    values = sorted((str(r["variant_id"]), r["size_code"], r["color_code"], max(0, int(r["available"]))) for r in rows)
+    values = sorted((str(r["variant_id"]), r["size_code"], r["color_code"], max(0, int(r["available"])), tuple(r.get("size_sources", ()))) for r in rows)
     return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -35,6 +36,10 @@ def database_url(private_dir):
 
 
 class Inventory:
+    def monthly_refusals(self):
+        rows = self._fetch('SELECT month_refusals FROM analytics.v_refusal_policy')
+        return int(rows[0]['month_refusals'])
+
     def __init__(self, url, clock=time.monotonic):
         self.url, self.clock = url, clock
         self.connection = None

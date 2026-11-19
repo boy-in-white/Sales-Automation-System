@@ -12,7 +12,7 @@ from inventory import StockUnavailable, stock_signature, stock_rows
 from customer_language import parameters, requested_size, requested_sizes, requested_color, requested_quantity, intents, reports_payment
 from shop_facts import measurements_reply, shipping_reply, shop_day, alternatives, choice_text, garment_reference, money
 from shopping_cart import ShoppingCart, YES
-from checkout import Checkout
+from checkout import Checkout, asks_payment_method
 from customer_advice import advice_plan, append_fact_answers, fact_answers, FACT_TOPICS
 from size_advice import asks_size_advice, height_advice, preferred_available_size
 from conversation_flow import entry as conversation_entry
@@ -22,7 +22,7 @@ from customer_questions import question_plan
 from selection_guard import guard_selection, slot_hint, invoice_variant
 from olx_delivery import acknowledgment
 from conversation_policy import requests_owner, abusive_only, autonomous_reply, next_step
-from conversation_turn import prepare, information_plan, subject_guard, checkout_declaration, finish
+from conversation_turn import prepare, information_plan, subject_guard, checkout_declaration, shipping_intake, finish
 import time
 
 
@@ -46,6 +46,13 @@ class Dialogue:
         raw = "\n".join(str(t) for t in texts)
         original = raw
         saved = copy.deepcopy(saved)
+        from payment_exception import plan as exception_plan
+        exception = exception_plan(self.inventory, raw, saved, has_attachments=has_attachments)
+        if exception is not None:
+            return finish(Plan(**exception), saved, original)
+        # A bare yes after a detour must not accept an old payment offer.
+        saved.pop('return_payment_exception_pending', None)
+        saved.pop('return_payment_exception_agreed', None)
         if saved.get('owner_request_reason') != 'customer':
             for key in ('owner_requested','handoff_now','owner_request_reason'):
                 saved.pop(key,None)
@@ -54,7 +61,7 @@ class Dialogue:
                     saved['checkout_stage'] = 'submitted' if saved.get('customer_confirmation') else 'details'
                 else:
                     saved.pop('checkout_stage',None)
-        texts = prepare(texts, saved, self.catalog)
+        texts = prepare(texts, saved, self.catalog, advert_id)
         raw = "\n".join(str(t) for t in texts)
         if delivery_notice and not raw.strip():
             return Plan(acknowledgment(self.catalog.shop, self.now() if self.now else None), copy.deepcopy(saved),
@@ -76,10 +83,13 @@ class Dialogue:
             body = APOLOGY if feedback == 'negative' else "Дуже тішуся, що вам сподобалося! Дякую за відгук 😊"
             result = Plan(body, copy.deepcopy(saved), {"feedback_acknowledged": True, "feedback_kind": feedback})
         else:
-            information = information_plan(self, texts, saved, advert_id, has_attachments)
+            intake = shipping_intake(self, texts, saved, advert_id, has_attachments)
+            information = None if intake is not None else information_plan(self, texts, saved, advert_id, has_attachments)
             subject = subject_guard(self, raw, saved, has_attachments)
             boundary = conversation_entry(raw, saved, self.catalog.adverts.get(str(advert_id)), has_attachments)
-            if subject is not None:
+            if intake is not None:
+                result = Plan(**intake)
+            elif subject is not None:
                 result = Plan(**subject)
             elif information is not None:
                 result = Plan(**information)
@@ -187,11 +197,17 @@ class Dialogue:
                                      self.now() if self.now else None, has_attachments)
             if question is not None:
                 has_selection = requested_size(text) or requested_color(text) or requested_quantity(text)
-                if flags.intersection({'order', 'availability'}) and has_selection and not question['on_send'].get('handoff_now'):
-                    action = self._plan(texts, context, advert_id, has_attachments, answer_questions=False)
-                    if question['text'] not in action.text and len(action.text + question['text']) + 2 <= 2000:
+                if (flags.intersection({'order', 'availability'}) and has_selection and not context.get('invoice_issued') and
+                        not question['on_send'].get('handoff_now')):
+                    method = question['on_send'].get('pending_checkout_method')
+                    action = self._plan(texts, dict(context, pending_checkout_method=method) if method else context,
+                                        advert_id, has_attachments, answer_questions=False)
+                    if (not (method and action.on_send.get('checkout_offered')) and question['text'] not in action.text and
+                            len(action.text + question['text']) + 2 <= 2000):
                         action.text += '\n\n' + question['text']
                         action.guard.update(question['guard'])
+                    if question['on_send'].get('pending_checkout_method') and not action.on_send.get('invoice_issued'):
+                        action.on_send['pending_checkout_method'] = question['on_send']['pending_checkout_method']
                     return action
                 extra = information_plan(self, texts, context, advert_id, has_attachments, allow_mixed=True)
                 if extra is not None and extra['text'] not in question['text']:
@@ -202,6 +218,9 @@ class Dialogue:
                 return Plan(**question)
         else:
             flags.discard('arrival')
+        method_answered = not answer_questions and context.get('pending_checkout_method') and asks_payment_method(raw)
+        if method_answered:
+            flags.difference_update({'delivery', 'payment'})
         if context.get("advice_pending") and (flags.intersection({"order", "cancel", "complaint", "availability", "price", "dispatch", "payment", "measurements"}) or
                                               re.search(r"додай|добав|прибери|убери", text)):
             context.pop("advice_pending", None)
@@ -214,7 +233,7 @@ class Dialogue:
         advice = advice_plan(self.catalog, text, context, advert_id, flags, self.now() if self.now else None, has_attachments)
         if advice is not None:
             return Plan(**advice)
-        checkout = Checkout(self.catalog, self.inventory, self.merchant, self.now, self.address_book).plan(raw, context, flags, has_attachments)
+        checkout = None if method_answered else Checkout(self.catalog, self.inventory, self.merchant, self.now, self.address_book).plan(raw, context, flags, has_attachments)
         if checkout is not None:
             return Plan(**append_fact_answers(checkout, self.catalog, text, flags, advert_id))
         if reports_payment(text) and not context.get("checkout_offered") and not context.get("invoice_issued"):
@@ -307,7 +326,6 @@ class Dialogue:
         if flags.intersection({"availability", "order", "sizing"}) or size or color:
             context.pop("checkout_offered", None)
             context.pop("checkout_stage", None)
-            context.pop("pending_checkout_method", None)
         if re.search(r"звичайн|обычн|стандарт|regular|по\s+фігур|по\s+фигур|не\s+хочу\s+оверсайз", text):
             context["fit"] = "regular"
         elif re.search(r"оверсайз|oversiz|вільн|свободн|пошир|пошыр", text):
@@ -400,7 +418,7 @@ class Dialogue:
         for intent in ("price", "delivery", "payment", "returns", "measurements", "authenticity"):
             if intent not in flags:
                 continue
-            if intent == "delivery" and "dispatch" in flags:
+            if intent == "delivery" and ("dispatch" in flags or "payment" in flags and self.catalog.shop.get('payment')):
                 continue
             if intent == "measurements":
                 body, missing = measurements_reply(product, requested_sizes(text) or ([context["size"]] if context.get("size") else None))
@@ -427,9 +445,8 @@ class Dialogue:
                     human_needed = True
                     notes.append("Відсутній факт у shop.json: " + intent)
         if "photos" in flags:
-            human_needed = True
-            parts.append("Уточніть, будь ласка, який ракурс або деталь хочете побачити?")
-            notes.append("Фото потрібно додати вручну в OLX; Repliq не вигадує зображення.")
+            from advert_knowledge import PHOTOS_NOTICE
+            parts.append(PHOTOS_NOTICE)
 
         topic = context.get("topic")
         needs_stock = bool(flags.intersection({"availability", "sizing", "order"}) or wants_advice or pending_advice or size or color or values or
@@ -585,6 +602,14 @@ class Dialogue:
                 return result(" ".join(parts + ["Який колір вам подобається? Зараз є: %s." % ", ".join(colors)]), "color")
             if topic == "order" or "order" in flags or context.get("order_requested"):
                 instructions = self.catalog.shop.get("order_instructions")
+                if context.get('pending_checkout_method'):
+                    from carrier_payment import enabled as carrier_enabled
+                    proposed = {
+                        'cod': ('Оформимо післяплатою з оплатою доставки за ТТН, а товар — при отриманні?' if carrier_enabled(self.catalog.shop) else
+                                'Оформимо післяплатою з передоплатою 100 грн, а решту за товар — при отриманні?'),
+                        'full': 'Оформимо з повною оплатою товару, а доставку оплатите при отриманні?',
+                        'olx': 'Оформимо OLX Доставкою з оплатою в самому OLX?'}
+                    instructions = proposed.get(context['pending_checkout_method'], instructions)
                 if instructions:
                     parts.append(instructions)
                 else:

@@ -3,16 +3,27 @@
 from telebot import types
 
 
+def charts_keyboard(period='month'):
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton('📊 Діаграми за місяць', callback_data='analytics:chart:month'),
+        types.InlineKeyboardButton('За весь час', callback_data='analytics:chart:all'),
+    )
+    return keyboard
+
+
 def submission_keyboard(
     submission_id: str,
     *,
     offline: bool = False,
 ) -> types.InlineKeyboardMarkup:
+    if not offline:
+        return awaiting_shipment_keyboard(submission_id)
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         types.InlineKeyboardButton(
-            "Продаж завершено ✓" if offline else "Підтвердити ✓",
-            callback_data=f"sub:c:{submission_id}" if offline else f"sub:r:{submission_id}",
+            "Продаж завершено ✓" if offline else "Відправлено ✓",
+            callback_data=f"sub:c:{submission_id}",
         ),
         types.InlineKeyboardButton("Виправити дані", callback_data=f"sub:e:{submission_id}"),
     )
@@ -26,7 +37,7 @@ def awaiting_shipment_keyboard(submission_id: str) -> types.InlineKeyboardMarkup
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         types.InlineKeyboardButton(
-            "Позначити як відправлене ✓", callback_data=f"sub:c:{submission_id}"
+            "Відправлено ✓", callback_data=f"sub:c:{submission_id}"
         ),
         types.InlineKeyboardButton(
             "Скасувати", callback_data=f"sub:x:{submission_id}"

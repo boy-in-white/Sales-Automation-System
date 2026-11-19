@@ -49,6 +49,7 @@ def _menu_keyboard() -> types.InlineKeyboardMarkup:
     keyboard.add(
         types.InlineKeyboardButton("➕ Додати товар", callback_data="inv:add:start")
     )
+    keyboard.add(types.InlineKeyboardButton('🧾 Нове замовлення / продаж', callback_data='new:start'))
     keyboard.add(
         types.InlineKeyboardButton("📦 Залишки", callback_data="inv:list:view:0"),
         types.InlineKeyboardButton(

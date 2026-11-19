@@ -117,7 +117,7 @@ class OrderBoard:
                 payment += "\nАктивний за розкладом акаунт Нової пошти ще не налаштований."
         address = order.get("shipping", {})
         place = "\n📍 " + " · ".join(address.get(k, "") for k in ("place", "branch") if address.get(k)) if address.get("place") or address.get("branch") else ""
-        return header + "\n\n" + phase(order, bool(card["verified"])) + "\n\n" + summary(order, shipping=False) + place + payment + "\n\nОплата й відправлення — у Ledgerly."
+        return header + "\n\n" + phase(order, bool(card["verified"])) + "\n\n" + summary(order, shipping=False, internal=True) + place + payment + "\n\nОплата й відправлення — у Ledgerly."
 
     def details(self, account, thread):
         card = self.get(account, thread)

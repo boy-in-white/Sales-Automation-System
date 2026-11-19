@@ -9,6 +9,22 @@ from order_summary import snapshot, invoice_key, confirmation_key
 from carrier_payment import direct_delivery
 
 
+def shipped_waybill(parcel):
+    ttn = str(parcel.get('ttn') or '')
+    if parcel.get('status') == 'created' and parcel.get('ledgerly_status') == 'shipped' and re.fullmatch(r'\d{14}', ttn):
+        return ttn
+    return ''
+
+
+def can_watch_shipment(context, raw):
+    order = str(context.get('invoice_id') or '')
+    references = set(re.findall(r'\bRQ-[0-9A-F]{12}\b', raw.upper()))
+    numbers = set(re.findall(r'(?<!\d)\d{14}(?!\d)', raw))
+    parcel = context.get('parcel', {})
+    return bool(order and context.get('invoice_issued') and parcel.get('status') != 'cancelled' and
+                (not references or references == {order.upper()}) and (not numbers or numbers == {str(parcel.get('ttn'))}))
+
+
 class CustomerUpdates:
     def __init__(self, store):
         self.store = store
@@ -50,20 +66,32 @@ class CustomerUpdates:
             return
         verified = context.get('payment_verified') and context.get('verified_invoice_key') == key
         review = int(parcel.get('payment_review_revision') or 0) if not verified and not direct_delivery(order) else 0
-        if not direct_delivery(order) and not verified and not review:
-            return
-        kinds = [('payment_review', '')] if review else (([] if not verified else [('delivery_paid', '')]) if direct_delivery(order) else [("dispatch", "")])
-        if not review and parcel.get("status") == "created" and re.fullmatch(r"\d{14}", str(parcel.get("ttn", ""))):
-            kinds.insert(0, ("waybill", parcel["ttn"]))
+        kinds = []
+        if review:
+            kinds.append(('payment_review', ''))
+        elif direct_delivery(order) or verified:
+            if verified:
+                if direct_delivery(order) and parcel.get('ledgerly_status') != 'shipped':
+                    kinds.append(('delivery_paid', ''))
+                elif not direct_delivery(order):
+                    kinds.append(('dispatch', ''))
+            if parcel.get('status') == 'created' and re.fullmatch(r'\d{14}', str(parcel.get('ttn') or '')):
+                kinds.insert(0, ('waybill', parcel['ttn']))
+        ttn = shipped_waybill(parcel)
+        if ttn and context.get('shipment_notice_invoice') == order['id']:
+            kinds = [(kind, value) for kind, value in kinds if kind != 'waybill']
+            kinds.insert(0, ('shipped', ttn))
         for kind, ttn in kinds:
             values = [account, thread, key, kind, ttn]
-            if review:
+            if kind == 'payment_review':
                 values.append(review)
             identity = hashlib.sha256(json.dumps(values).encode()).hexdigest()
             announced = kind == "dispatch" and (context.get("dispatch_announced_key") == key or parcel.get("ledgerly_status") == "shipped")
+            if kind == 'shipped':
+                announced = context.get('shipment_notice_announced') == ttn
             with self.store.db() as db:
                 db.execute("INSERT OR IGNORE INTO customer_updates(id,account,thread,buyer,advert,invoice_id,invoice_key,kind,ttn,status,created,updated,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                           (identity, account, thread, buyer, advert, order["id"], key, kind, ttn, "sent" if announced else "pending", time.time(), time.time(), review))
+                           (identity, account, thread, buyer, advert, order["id"], key, kind, ttn, "sent" if announced else "pending", time.time(), time.time(), review if kind == 'payment_review' else 0))
                 if verified:
                     db.execute("UPDATE customer_updates SET status='pending',note='',updated=? WHERE id=? AND status='stale' AND note='payment_wait'", (time.time(), identity))
                 if announced:

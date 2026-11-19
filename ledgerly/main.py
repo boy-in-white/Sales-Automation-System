@@ -93,6 +93,9 @@ def register_commands(bot: telebot.TeleBot) -> None:
             owner_commands = [
                 telebot.types.BotCommand("add_product", "Додати товар"),
                 telebot.types.BotCommand("stats", "Статистика"),
+                telebot.types.BotCommand("new_order", "Нове замовлення / продаж"),
+                telebot.types.BotCommand("charts", "Діаграми продажів і складу"),
+                telebot.types.BotCommand("refusals", "Відмови за місяць і весь час"),
                 telebot.types.BotCommand("stock", "Склад і товари"),
                 telebot.types.BotCommand("turnover", "Оборот"),
                 telebot.types.BotCommand("status", "Перевірити ТТН"),

@@ -47,10 +47,16 @@ def fingerprint(messages):
     return hashlib.sha256(json.dumps(values, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def candidate(messages, allowed, include_delivery_notices=False):
+def candidate(messages, allowed, include_delivery_notices=False, transparent_sent=()):
     # OLX purchase notifications can arrive with type=received. They are not a
     # buyer utterance and must not cause a conversational reply or fake payment.
     original = messages
+    # Our own reply can overtake an incoming fragment while POST is in flight.
+    # It is not evidence that the fragment was answered. Manual seller replies
+    # remain hard boundaries. Keep the full history in the fingerprint.
+    transparent = {str(value).casefold() for value in transparent_sent}
+    messages = [m for m in messages if not (m.get("type") == "sent" and
+                any(str(m.get(k, "")).casefold() in transparent for k in ("_id", "id", "uuid")))]
     if not include_delivery_notices:
         messages = [m for m in messages if not platform_notice(m.get('text', ''))]
     if not messages or messages[-1].get("type") != "received":

@@ -53,7 +53,8 @@ class ReceiptArchiveTests(unittest.TestCase):
         texts=[b.text for line in inbox.keyboard(row).keyboard for b in line]
         self.assertNotIn('✅ Оплату перевірено',texts)
         self.assertNotIn('❌ Оплата не підтвердилась',texts)
-        self.assertIn('✅ Підтвердити замовлення',texts)
+        self.assertIn('📦 Відправлено',texts)
+        self.assertNotIn('✅ Підтвердити замовлення',texts)
         self.assertIn('🧾 Квитанція',texts)
         text=inbox.card_text(row)
         self.assertIn('✅ mono',text);self.assertIn('✅ Квитанцію',text)

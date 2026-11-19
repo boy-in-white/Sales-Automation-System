@@ -141,6 +141,8 @@ def extract_uid_from_text(text: str) -> int | None:
 
 
 def make_offline_key(message: Any) -> str:
+    if getattr(message, 'submission_id', None):
+        return 'OFFLINE-' + message.submission_id
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"OFFLINE-{stamp}-{getattr(message, 'message_id', 0)}"
 
@@ -202,6 +204,7 @@ def _record_business_order(
         source_user_id=_message_user_id(message),
         source_user_name=_message_user_name(message),
         initial_status=initial_status,
+        inventory_variant_id=parsed.get('inventory_variant_id') or '',
     )
 
 
@@ -271,11 +274,11 @@ def _record_ukrposhta(
         ensure_tracking_message(bot,shipment,snapshot)
 
 
-def _process_claimed_message(bot: Any, message: Any) -> str:
+def _process_claimed_message(bot: Any, message: Any, parsed_override=None) -> str:
     raw = cleaned_source_text(message)
     if not raw:
         return "ignored"
-    parsed = parse_message(raw)
+    parsed = parsed_override or parse_message(raw)
     ttns = extract_ttns(raw)
     owner_name = resolve_owner_name(message)
     carrier = detect_carrier(raw)
@@ -340,8 +343,10 @@ def process_submission(bot: Any, submission: dict[str, Any]) -> str:
         message_id=int(submission.get("telegram_message_id") or 0),
         chat=SimpleNamespace(id=TG_GROUP_ID),
         from_user=fake_user,
+        submission_id=submission['id'],
     )
-    return _process_claimed_message(bot, fake_message)
+    parsed = submission.get('parsed') or {}
+    return _process_claimed_message(bot, fake_message, parsed if parsed.get('manual_entry') else None)
 
 
 def handle_incoming_group_message(bot: Any, message: Any) -> None:

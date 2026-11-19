@@ -50,6 +50,11 @@ def quantity_change(catalog, inventory, raw, context, has_attachments=False):
         pending = dict(pending, line=targets[0], phase="apply")
     if not pending or "line" not in pending or not 0 <= pending["line"] < len(items):
         return None
+    target = items[pending['line']]
+    new_amount = target['quantity'] + pending['amount'] if pending['mode'] == 'add' else pending['amount']
+    if new_amount == target['quantity'] and not has_attachments and not reports_payment(raw):
+        context.pop('quantity_change', None)
+        return ('Так, у замовленні вже записано %s шт. цієї позиції.' % new_amount, False, {})
     # A payment report/proof can refer to the old amount; the owner must reconcile it.
     if reports_payment(raw):
         context["payment_reported"] = True
@@ -58,8 +63,6 @@ def quantity_change(catalog, inventory, raw, context, has_attachments=False):
     if context.get("receipt_submitted") or context.get("payment_reported") or context.get("payment_verified"):
         context["quantity_change"] = pending
         return ("Можемо змінити кількість. Спершу звіримо вже надіслану оплату або вкладення й нову суму особисто. Повторно нічого не переказуйте.", True, {})
-    target = items[pending["line"]]
-    new_amount = target["quantity"] + pending["amount"] if pending["mode"] == "add" else pending["amount"]
     if not 1 <= new_amount <= 20:
         context.pop("quantity_change", None)
         return ("Уточнимо потрібну кількість особисто, щоб правильно зібрати велике замовлення.", True, {})
@@ -80,6 +83,8 @@ def quantity_change(catalog, inventory, raw, context, has_attachments=False):
             if available < demand:
                 context.pop("quantity_change", None)
                 return ("Перевірив наявність: для цієї позиції зараз доступно %s шт. Попереднє замовлення збережено. Залишаємо його чи оберемо інший варіант?" % available, False, {"stocks": signatures})
+        from size_fulfillment import allocate
+        items = allocate(catalog, inventory, items)
     except StockUnavailable:
         return ("Уточнимо наявність перед зміною кількості. Попередню суму не змінюю, доки не перевіримо товари.", True, {})
     if any(item.get("unit_price") is None for item in items):

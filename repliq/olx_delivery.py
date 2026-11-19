@@ -13,7 +13,7 @@ from shop_facts import shop_day, shipping_reply
 
 
 def ukrposhta(text):
-    return bool(re.search(r'\b(?:укр[ .-]*(?:пошт|почт)\w*|ukr[ .-]*(?:poshta|pochta))\b', canonical(text)))
+    return bool(re.search(r'\b(?:укр[ .-]*(?:пошт|почт)\w*|ukr[ .-]*(?:poshta|pochta)|(?:на|по|через)\s+укр)\b', canonical(text)))
 
 
 def order_report(text):
@@ -21,7 +21,8 @@ def order_report(text):
     if re.search(r'(?:у|в|от)\s+(?:іншого|другого)\b|іншому\s+продавц|другому\s+продавц|не\s+у\s+вас|не\s+в\s+вас', text):
         return False
     for match in re.finditer(r'\b(?:оформив|оформила|оформлено|оформлен(?:о|ий)?|замовив|замовила|заказал|заказала)\b|\b(?:підтвердіть|подтвердите)\b', text):
-        if not re.search(r'\b(?:не|ще\s+не|еще\s+не|так\s+і\s+не)\s*$', text[max(0, match.start()-25):match.start()]):
+        prefix = text[max(0, match.start()-40):match.start()]
+        if not re.search(r'\bне\s*$|\b(?:якщо|если)\b[^,?.!]*$', prefix):
             return True
     return False
 
@@ -57,7 +58,9 @@ def delivery_plan(catalog, raw, saved, now=None):
         return {'text': 'Добре, тоді поки не оформлюємо OLX Доставку. Якщо захочете повернутися до вибору — пишіть.',
                 'context': context, 'on_send': {'checkout_method': None, 'checkout_stage': None, 'checkout_offered': False}, 'guard': {}, 'notes': []}
     rejected = mentioned and bool(re.search(r'не\s+(?:хочу\s+)?укр|укр\w*\s+не\s+(?:хочу|потріб|надо)', text))
-    if mentioned and not rejected:
+    from checkout import asks_payment_method
+    asking = asks_payment_method(text)
+    if mentioned and not rejected and (not asking or report):
         context['olx_carrier'] = 'ukrposhta'
     elif rejected:
         context.pop('olx_carrier', None)
@@ -74,7 +77,7 @@ def delivery_plan(catalog, raw, saved, now=None):
         return {'text': body, 'context': context, 'on_send': sent,
                 'guard': {'shipping_day': str(shop_day(catalog.shop, now))}, 'notes': []}
     sent = {}
-    if (not saved.get('invoice_issued') and saved.get('checkout_offered') and not cod_mentioned(text) and
+    if (not asking and not saved.get('invoice_issued') and saved.get('checkout_offered') and not cod_mentioned(text) and
             re.search(r'давай|обираю|оформлю|олх|olx|хочу', text)):
         sent.update(checkout_method='olx', checkout_stage='olx_waiting')
     return {'text': 'Так, Укрпоштою можна замовити — лише через OLX Доставку з оплатою в самому OLX. '

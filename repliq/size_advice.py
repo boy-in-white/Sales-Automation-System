@@ -16,6 +16,13 @@ def preferred_available_size(rows, candidates, color=None, quantity=1, preferred
 
 def asks_size_advice(text, awaiting=None):
     text = canonical(text)
+    # Explicit body units and a height supplied in answer to the size question
+    # are requests for help too, even without the word "розмір".
+    body, errors = parameters(text, {"awaiting": awaiting}, weight_for_fit=False)
+    if body.get("height") and not errors and not re.search(
+        r'на\s+фото|модел|людині|человек|довжин|длин|ширин|обхват|замір|замер|телефон', text
+    ):
+        return True
     explicit = bool(re.search(
         r"(?:який|якого|какой|какого).{0,20}(?:розмір|размер).{0,35}(?:мені|мне|підій|подойд|порад|рекоменд)|"
         r"(?:розмір|размер).{0,25}(?:підій|подойд|порад|рекоменд)|"

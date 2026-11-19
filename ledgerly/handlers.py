@@ -13,7 +13,6 @@ from auth import ANALYTICS_ACCESS
 from backup import create_backup
 from business_db import (
     add_product_alias,
-    attach_submission_message,
     business_health,
     create_submission,
     current_month_label,
@@ -21,6 +20,7 @@ from business_db import (
     export_1c_csv,
     format_money,
     get_monthly_turnover,
+    get_refusal_counts,
     get_sales_stats,
     list_products,
     rename_product,
@@ -28,8 +28,6 @@ from business_db import (
 )
 from config import (
     DATABASE_URL,
-    TG_EMPLOYEES_THREAD_ID,
-    TG_GROUP_ID,
     TIMEZONE,
     is_admin,
     is_owner,
@@ -50,7 +48,8 @@ from tracking_db import (
 )
 from tracking_notify import build_employee_text
 from tracking_service import fetch_tracking_snapshot, refresh_ttn
-from ui import clear_current_month_keyboard, submission_keyboard
+from ui import clear_current_month_keyboard, charts_keyboard
+from order_entry import handle_text as handle_order_text, publish_submission, start_order
 from validator import validate
 
 LOGGER = logging.getLogger(__name__)
@@ -58,6 +57,8 @@ PROTECTED_DATA_COMMANDS = {
     "/turnover",
     "/oborot",
     "/stats",
+    "/refusals",
+    "/charts",
     "/export",
     "/export1c",
     "/clear_month",
@@ -93,12 +94,15 @@ def private_help_text(admin: bool = False, owner: bool = False) -> str:
         lines.extend(
             [
                 "/stats — продажі, витрати й прибуток",
+                "/charts — діаграми (місяць, all або YYYY-MM)",
+                "/refusals — відмови за місяць і за весь час",
             ]
         )
     if admin:
         lines.extend(
             [
                 "/stock — склад і залишки",
+                "/new_order — замовлення або продаж через кнопки",
                 "/status ТТН — перевірити посилку",
                 "/retry ТТН — повторити відстеження",
                 "/health — перевірити роботу бота",
@@ -362,7 +366,26 @@ def _handle_stats(bot: Any, chat_id: int, args: list[str]) -> None:
             f"{stats['cost_pending_count']} продаж(і) — потрібна собівартість"
         )
     lines.append(f"Відмов: {stats['refusals_count']} ({stats['refusal_rate']:.1f}%)")
-    bot.send_message(chat_id, "\n".join(lines))
+    bot.send_message(chat_id, "\n".join(lines), reply_markup=charts_keyboard())
+
+
+def _handle_charts(bot: Any, chat_id: int, args: list[str]) -> None:
+    from chart_data import dashboard_data
+    from charts import render_dashboard
+    try:
+        if len(args) > 1:
+            raise ValueError('One period expected')
+        data = dashboard_data(args[0] if args else 'month')
+    except ValueError:
+        bot.send_message(chat_id, 'Приклад: /charts, /charts all або /charts 2026-11')
+        return
+    with render_dashboard(data) as picture:
+        # Re-check the password session after rendering, including callback use.
+        if not is_owner(chat_id) or not ANALYTICS_ACCESS.is_unlocked(chat_id):
+            bot.send_message(chat_id, 'Фінанси закриті. Спочатку /unlock пароль 🔒')
+            return
+        bot.send_photo(chat_id, picture, caption='📊 Ledgerly · %s\nВідмови — реальні за період; склад — поточний. Витрати й прибуток враховують відому собівартість.' % data['period'],
+                       reply_markup=charts_keyboard())
 
 
 def _handle_clear_month(bot: Any, chat_id: int, args: list[str]) -> None:
@@ -581,9 +604,12 @@ def handle_private_message(bot: Any, message: Any) -> None:
         "/turnover",
         "/oborot",
         "/stats",
+        "/refusals",
+        "/charts",
         "/clear_month",
         "/stock",
         "/add_product",
+        "/new_order",
         "/products",
         "/product",
         "/edit",
@@ -604,12 +630,20 @@ def handle_private_message(bot: Any, message: Any) -> None:
             _handle_turnover(bot, chat_id, args)
         elif command == "/stats":
             _handle_stats(bot, chat_id, args)
+        elif command == "/charts":
+            _handle_charts(bot, chat_id, args)
+        elif command == "/refusals":
+            counts = get_refusal_counts()
+            bot.send_message(chat_id, '↩️ Відмови\n\nЗа поточний місяць: %s\nЗа весь час: %s\n\nВиняток без передоплати: %s' % (
+                counts['month'], counts['total'], 'доступний за згодою оплатити повернення' if counts['month'] < 2 else 'недоступний (ліміт — менше 2 відмов за місяць)'))
         elif command == "/clear_month":
             _handle_clear_month(bot, chat_id, args)
         elif command == "/stock":
             send_inventory_menu(bot, chat_id, user_id)
         elif command == "/add_product":
             start_inventory_product_creation(bot, chat_id, user_id)
+        elif command == '/new_order':
+            start_order(bot, chat_id, user_id)
         elif command == "/products":
             _handle_products(bot, chat_id)
         elif command == "/product":
@@ -634,6 +668,8 @@ def handle_private_message(bot: Any, message: Any) -> None:
         return
     if command:
         bot.send_message(chat_id, "Не впізнав цю команду. Підказка є в /help.")
+        return
+    if is_admin(user_id) and handle_order_text(bot, message):
         return
     if is_admin(user_id) and handle_inventory_text(bot, message):
         return
@@ -675,14 +711,8 @@ def handle_private_message(bot: Any, message: Any) -> None:
         user_id,
         getattr(user, "full_name", None) or getattr(user, "username", None) or "",
     )
-    forwarded = bot.send_message(
-        TG_GROUP_ID,
-        forward_text,
-        message_thread_id=TG_EMPLOYEES_THREAD_ID,
-        reply_markup=submission_keyboard(submission_id, offline=offline),
-    )
-    attach_submission_message(submission_id, TG_GROUP_ID, forwarded.message_id)
-    summary = "Замовлення додано в «До відправки» 📦\nПеревір картку й натисни «Підтвердити замовлення»."
+    publish_submission(bot, submission_id, forward_text)
+    summary = "Замовлення додано в «До відправки» 📦\nНатисни «Відправлено» лише після фактичної передачі посилки."
     if offline:
         summary = "Готово — продаж чекає підтвердження оплати. 🤍"
     if ttns:

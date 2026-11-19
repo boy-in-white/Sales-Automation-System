@@ -49,7 +49,12 @@ def parse_items(catalog, text, default_product=None):
         pieces, start = [], 0
         for separator in SEPARATOR.finditer(segment):
             left, right = segment[start:separator.start()], segment[separator.end():]
-            if (requested_size(left) or requested_color(left)) and (requested_size(right) or requested_color(right)):
+            # Complementary fragments ("L\nчорні") describe one item.
+            # Split only when the next fragment introduces another value for
+            # the same slot or explicitly gives another quantity.
+            if (requested_size(left) and requested_size(right) or
+                    requested_color(left) and requested_color(right) or
+                    requested_quantity(left) is not None and requested_quantity(right) is not None):
                 pieces.append(left)
                 start = separator.end()
         pieces.append(segment[start:])

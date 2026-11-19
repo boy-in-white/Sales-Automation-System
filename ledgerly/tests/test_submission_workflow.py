@@ -48,12 +48,14 @@ class SubmissionWorkflowTests(unittest.TestCase):
             caption=None,
         )
         handlers.handle_private_message(bot, message)
-        self.assertIn("Опис: Штани suvene чорні S", bot.sent[0].text)
-        self.assertIn("Ціна продажу: 1134", bot.sent[0].text)
+        card = next(m for m in bot.sent if m.reply_markup and any(b.callback_data.startswith('sub:') for row in m.reply_markup.keyboard for b in row))
+        self.assertIn("Опис: Штани suvene чорні S", card.text)
+        self.assertIn("Ціна продажу: 1134", card.text)
         self.assertIn("0504947958303", bot.sent[-1].text)
-        self.assertIn("Підтвердити замовлення", bot.sent[-1].text)
-        self.assertNotIn("Опис: 1134", bot.sent[0].text)
-        self.assertEqual(business_db.business_health()["orders"], 0)
+        self.assertIn("Відправлено", bot.sent[-1].text)
+        self.assertNotIn("Опис: 1134", card.text)
+        self.assertEqual(business_db.business_health()["orders"], 1)
+        self.assertTrue(all(not b.callback_data.startswith('sub:r:') for row in card.reply_markup.keyboard for b in row))
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

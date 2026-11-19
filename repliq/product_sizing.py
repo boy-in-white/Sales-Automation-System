@@ -180,6 +180,12 @@ def process(worker, job):
     version, profile = registry.sizing_profile(product_id)
     def button(label, action, **extra):
         return {'text':label, 'callback_data':registry.choice(owner,dict(_action=action,product_id=product_id,**extra))}
+    if action == 'sizing_substitution':
+        enabled = payload.get('enabled')
+        if type(enabled) is not bool or not registry.save_sizing(product_id, 'size_substitution', {'size_substitution_enabled': enabled}, payload.get('revision')):
+            raise AppError('Налаштування змінилися. Відкрий товар заново.')
+        worker.compose_products()
+        return process(worker, dict(job, action='sizing_open'))
     if action == 'sizing_open':
         registry.store.set_meta('product-editor:%s:%s' % (registry.account,owner), {'product_id': product_id})
         with registry.store.db() as db:
@@ -187,9 +193,10 @@ def process(worker, job):
         measured, _ = measurements_reply(product)
         registry.tell(owner,event,'📏 '+record['canonical_name']+'\n\n📐 Заміри виробу\n'+(measured or 'Ще не додано.')+
                       '\n\n📊 Розмірна сітка для підбору\n'+guide_text(product)+
-                      '\n\nНа «які заміри?» бот надсилає заміри одягу. На «який розмір підійде?» — підбирає за сіткою та перевіряє наявність.',
+                      '\n\nЗаміна розмірів: за браку M можна взяти S, L — M, XL — L того самого кольору. Замовлений і складський розміри обліковуються окремо; у ТТН ставиться *. Зворотної заміни немає.\n\nНа «які заміри?» бот надсилає заміри одягу. На «який розмір підійде?» — підбирає за сіткою та перевіряє наявність.',
                       {'inline_keyboard':[[button('📐 Заміри виробу','sizing_edit',mode='measurements')],
                                           [button('📊 Розмірна сітка','sizing_edit',mode='guide')],
+                                          [button(('✓ Заміна розміру: увімкнена' if product.get('size_substitution_enabled') else 'Заміна розміру: вимкнена'), 'sizing_substitution', enabled=not product.get('size_substitution_enabled',False),revision=version)],
                                           [button('🧵 Характеристики','sizing_facts')],
                                           [button('📝 Опис товару','sizing_edit',mode='description')],
                                           [{'text':'← До товарів','callback_data':registry.choice(owner,{'_action':'sizing_list'})}]]})

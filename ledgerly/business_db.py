@@ -57,6 +57,11 @@ COLOR_WORDS = {
     "сіре": "GRAY",
     "сірі": "GRAY",
     "сірого": "GRAY",
+    "чёрный": "BLACK", "черный": "BLACK", "черная": "BLACK",
+    "чёрная": "BLACK", "черные": "BLACK", "чёрные": "BLACK",
+    "белый": "WHITE", "белая": "WHITE", "белые": "WHITE",
+    "серый": "GRAY", "серая": "GRAY", "серые": "GRAY",
+    "блек": "BLACK", "вайт": "WHITE", "грей": "GRAY",
 }
 ORDER_STATUSES = {
     "NEW",
@@ -578,6 +583,13 @@ def init_business_db() -> None:
     with _LOCK, _transaction() as session:
         backend = database_backend(BUSINESS_DATABASE_URL)
         statements = _schema_statements(backend)
+        if backend == 'postgresql':
+            statements.append("""CREATE OR REPLACE VIEW analytics.v_refusal_policy AS
+                SELECT COUNT(*) AS month_refusals
+                FROM business.orders
+                WHERE refused_at >= date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Kyiv') AT TIME ZONE 'Europe/Kyiv'
+                  AND refused_at < (date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Kyiv') + interval '1 month') AT TIME ZONE 'Europe/Kyiv'
+            """)
         from parcel_manifest import schema_statement
         statements.append(schema_statement())
         regular_statements = [
@@ -723,7 +735,8 @@ def resolve_product(name: str, create: bool = True) -> dict[str, Any] | None:
         product = session.one("SELECT * FROM products WHERE normalized_key = ?", (key,))
         product_id = product["id"]
         session.execute(
-            "INSERT INTO product_aliases(alias_key, raw_alias, product_id, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO product_aliases(alias_key, raw_alias, product_id, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(alias_key) DO NOTHING",
             (key, name.strip(), product_id, now),
         )
         return product
@@ -1665,13 +1678,14 @@ def review_submission(submission_id: str, status: str, reviewer_id: int) -> bool
 
 
 def claim_submission(submission_id: str, reviewer_id: int) -> bool:
+    stale_before = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
     with _LOCK, _transaction() as session:
         cursor = session.execute(
             """
             UPDATE order_submissions SET status = 'PROCESSING', reviewed_by = ?, updated_at = ?
-            WHERE id = ? AND status = 'PENDING'
+            WHERE id = ? AND (status = 'PENDING' OR (status = 'PROCESSING' AND updated_at < ?))
             """,
-            (int(reviewer_id or 0), _now(), submission_id),
+            (int(reviewer_id or 0), _now(), submission_id, stale_before),
         )
         return cursor.rowcount == 1
 
@@ -1717,21 +1731,14 @@ def _resolve_order_product(name: str) -> dict[str, Any] | None:
     """Reuse the configured base product when the order also contains a variant."""
 
     base_key, _, _ = _inventory_variant_hints(name)
-    if base_key:
-        with _LOCK, _transaction() as session:
-            products = session.all(
-                """
-                SELECT DISTINCT p.*
-                FROM products p
-                LEFT JOIN product_aliases a ON a.product_id = p.id
-                JOIN product_variants v ON v.product_id = p.id AND v.active = 1
-                WHERE p.active = 1
-                  AND (p.normalized_key = ? OR a.alias_key = ?)
-                """,
-                (base_key, base_key),
-            )
-        if len(products) == 1:
-            return products[0]
+    with _LOCK, _transaction() as session:
+        products, matches = _catalog_product_matches(session, base_key)
+        if len(matches) == 1:
+            return next(row for row in products if row['id'] == matches[0])
+        if products:
+            # A sale may refer to an unknown/ambiguous item. Preserve its raw
+            # text and financial history without creating a phantom stock SKU.
+            return None
     return resolve_product(name or "Невідомий товар", create=True)
 
 
@@ -1751,13 +1758,20 @@ def record_order(
     source_user_id: int = 0,
     source_user_name: str = "",
     initial_status: str = "CONFIRMED",
+    inventory_variant_id: str = "",
 ) -> dict[str, Any]:
     sale_type = SALE_TYPES.get(sale_type_label, "COD")
     with _LOCK, _transaction() as session:
         imported = session.all("SELECT DISTINCT product_id FROM repliq_parcel_items WHERE ttn=?", (ttn,))
         product = session.one("SELECT * FROM products WHERE id=?", (imported[0]["product_id"],)) if len(imported) == 1 else None
     if not imported:
-        product = _resolve_order_product(product_name or "Невідомий товар")
+        if inventory_variant_id:
+            with _LOCK, _transaction() as session:
+                product = session.one('SELECT p.* FROM products p JOIN product_variants v ON v.product_id=p.id WHERE v.id=? AND v.active=1 AND p.active=1', (inventory_variant_id,))
+            if not product:
+                raise ValueError('Selected inventory variant is no longer active')
+        else:
+            product = _resolve_order_product(product_name or "Невідомий товар")
     now = _now()
     shipped_at = now if initial_status == "SHIPPED" else None
     sold_at = now if initial_status == "DELIVERED" else None
@@ -2082,20 +2096,65 @@ def update_order_status(
 def _inventory_variant_hints(text: str) -> tuple[str, str | None, str | None]:
     """Extract a base product key plus optional size and color from free text."""
 
-    size: str | None = None
-    color: str | None = None
+    sizes: set[str] = set()
+    colors: set[str] = set()
     product_tokens: list[str] = []
     ignored = {"колір", "цвет", "color", "розмір", "размер", "size"}
-    for token in re.findall(r"[A-Za-zА-ЯІЇЄҐа-яіїєґ0-9]+", text or ""):
+    size_aliases = {'ХS': 'XS', 'ХС': 'XS', 'С': 'S', 'М': 'M', 'Л': 'L', 'ХЛ': 'XL', 'XЛ': 'XL', 'ХL': 'XL'}
+    for token in re.findall(r"[A-Za-zА-ЯІЇЄҐЁа-яіїєґё0-9]+", unicodedata.normalize('NFKC', text or '')):
         folded = token.casefold()
-        upper = token.upper()
+        upper = size_aliases.get(token.upper(), token.upper())
         if upper in SIZE_CODES:
-            size = upper
+            sizes.add(upper)
         elif folded in COLOR_WORDS:
-            color = COLOR_WORDS[folded]
+            colors.add(COLOR_WORDS[folded])
         elif folded not in ignored:
             product_tokens.append(token)
+    size = next(iter(sizes)) if len(sizes) == 1 else 'AMBIGUOUS' if sizes else None
+    color = next(iter(colors)) if len(colors) == 1 else 'AMBIGUOUS' if colors else None
     return normalize_product_key(" ".join(product_tokens)), size, color
+
+
+_CATEGORY_WORDS = {
+    'футболка': 'tee', 'футболки': 'tee', 'футболку': 'tee', 'футболок': 'tee',
+    'штани': 'pants', 'штанів': 'pants', 'штанами': 'pants', 'брюки': 'pants', 'брюк': 'pants',
+    'худі': 'hoodie', 'худи': 'hoodie', 'толстовка': 'hoodie', 'толстовки': 'hoodie',
+    'куртка': 'jacket', 'куртки': 'jacket', 'куртку': 'jacket',
+    'шорти': 'shorts', 'шортів': 'shorts', 'шорты': 'shorts',
+}
+
+
+def _product_identity(key: str) -> tuple[frozenset[str], frozenset[str]]:
+    tokens = set(key.split())
+    categories = frozenset(_CATEGORY_WORDS[t] for t in tokens if t in _CATEGORY_WORDS)
+    return categories, frozenset(tokens - set(_CATEGORY_WORDS))
+
+
+def _catalog_product_matches(session: Session, base_key: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Use the same deterministic identity rules for orders and stock deductions.
+
+    Brand/model tokens must match fully. A missing garment type is allowed
+    only for a unique match; an explicitly different type never matches.
+    """
+    products = session.all('''SELECT DISTINCT p.* FROM products p
+        JOIN product_variants v ON v.product_id=p.id AND v.active=1 WHERE p.active=1''')
+    keys = {row['id']: {row['normalized_key']} for row in products}
+    for alias in session.all('SELECT product_id,alias_key FROM product_aliases'):
+        if alias['product_id'] in keys:
+            keys[alias['product_id']].add(alias['alias_key'])
+    exact = [pid for pid, names in keys.items() if base_key and base_key in names]
+    if exact:
+        return products, exact
+    categories, identity = _product_identity(base_key)
+    matches = []
+    if identity:
+        for pid, names in keys.items():
+            for name in names:
+                other_categories, other_identity = _product_identity(name)
+                if identity == other_identity and (not categories or categories == other_categories):
+                    matches.append(pid)
+                    break
+    return products, matches
 
 
 def _match_inventory_variant(
@@ -2104,49 +2163,18 @@ def _match_inventory_variant(
 ) -> tuple[dict[str, Any] | None, str]:
     raw_name = str(order.get("raw_product_name") or "").strip()
     base_key, size, color = _inventory_variant_hints(raw_name)
-    products = session.all(
-        """
-        SELECT DISTINCT p.id, p.canonical_name, p.normalized_key
-        FROM products p
-        JOIN product_variants v ON v.product_id = p.id AND v.active = 1
-        WHERE p.active = 1
-        """
-    )
+    if 'AMBIGUOUS' in (size, color):
+        return None, 'В описі кілька розмірів або кольорів. Уточни кожну позицію окремо'
+    products, product_ids = _catalog_product_matches(session, base_key)
     if not products:
         return None, "У каталозі складу ще немає налаштованих товарів"
 
-    aliases = session.all("SELECT product_id, alias_key FROM product_aliases")
-    keys_by_product: dict[str, set[str]] = {
-        row["id"]: {row["normalized_key"]} for row in products
-    }
-    for alias in aliases:
-        if alias["product_id"] in keys_by_product:
-            keys_by_product[alias["product_id"]].add(alias["alias_key"])
-
-    product_ids = [
-        product_id
-        for product_id, keys in keys_by_product.items()
-        if base_key and base_key in keys
-    ]
-    if not product_ids and order.get("product_id") in keys_by_product:
-        product_ids = [str(order["product_id"])]
-    if not product_ids and base_key:
-        base_tokens = set(base_key.split())
-        scored: list[tuple[float, str]] = []
-        for product_id, keys in keys_by_product.items():
-            score = max(
-                (
-                    len(base_tokens.intersection(set(key.split())))
-                    / max(len(base_tokens), len(set(key.split())))
-                )
-                for key in keys
-                if key
-            )
-            if score >= 0.66 and len(base_tokens) >= 2:
-                scored.append((score, product_id))
-        scored.sort(reverse=True)
-        if scored and (len(scored) == 1 or scored[0][0] > scored[1][0]):
-            product_ids = [scored[0][1]]
+    configured_ids = {row['id'] for row in products}
+    preferred = order.get('product_id')
+    if preferred in product_ids:
+        product_ids = [str(preferred)]
+    elif not product_ids and not base_key and preferred in configured_ids:
+        product_ids = [str(preferred)]
 
     if len(product_ids) != 1:
         return None, "Не вдалося однозначно знайти товар за описом"
@@ -2713,7 +2741,7 @@ def edit_order_by_ttn(
     values: list[Any] = []
     details: dict[str, Any] = {}
     if changes.get("product"):
-        product = resolve_product(changes["product"], create=True)
+        product = _resolve_order_product(changes["product"])
         updates.extend(["product_id = ?", "raw_product_name = ?"])
         values.extend([product["id"] if product else None, changes["product"]])
         details["product"] = changes["product"]
@@ -2811,6 +2839,20 @@ def finish_notification(
                 notification_type,
             ),
         )
+
+
+def get_refusal_counts() -> dict[str, int]:
+    """Real refusal history, independent of financial analytics resets."""
+    local = datetime.now(ZoneInfo(TIMEZONE))
+    start = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = (start.replace(year=start.year + 1, month=1) if start.month == 12
+           else start.replace(month=start.month + 1))
+    with _LOCK, _transaction() as session:
+        row = session.one('''SELECT COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN refused_at >= ? AND refused_at < ? THEN 1 ELSE 0 END),0) AS month
+            FROM orders WHERE refused_at IS NOT NULL''',
+            (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()))
+    return {key: int(row[key]) for key in ('month', 'total')}
 
 
 def get_monthly_turnover(month: str) -> dict[str, Any] | None:

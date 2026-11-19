@@ -31,6 +31,15 @@ def main() -> None:
         with business_db._LOCK, business_db._transaction() as session:
             checks = (
                 (
+                    'sales linked to a different product than their stock write-off',
+                    '''SELECT COUNT(DISTINCT o.id) AS amount FROM orders o
+                    JOIN inventory_movements m ON m.order_id=o.id
+                    JOIN product_variants v ON v.id=m.variant_id
+                    WHERE m.movement_type='SALE_1C' AND m.quantity_delta<0
+                      AND (o.product_id IS NULL OR o.product_id<>v.product_id)
+                      AND NOT EXISTS (SELECT 1 FROM repliq_parcel_items i WHERE i.ttn=o.ttn)''',
+                ),
+                (
                     "negative or over-reserved stock",
                     """
                     SELECT COUNT(*) AS amount FROM inventory_balances

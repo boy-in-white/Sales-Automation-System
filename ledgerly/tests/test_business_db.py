@@ -6,6 +6,13 @@ import business_db
 
 
 class BusinessDatabaseTests(unittest.TestCase):
+    def test_refusal_counts_survive_financial_reset(self):
+        business_db.record_order(ttn='refusal-test', sale_type_label='ОЛХ', carrier='Nova Poshta', product_name='Штани', sale_price='800')
+        business_db.update_order_status_by_ttn('refusal-test', 'REFUSED')
+        self.assertEqual(business_db.get_refusal_counts(), {'month': 1, 'total': 1})
+        business_db.clear_current_month_analytics(1, 'Owner')
+        self.assertEqual(business_db.get_refusal_counts(), {'month': 1, 'total': 1})
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         path = Path(self.temp_dir.name) / "business.sqlite3"

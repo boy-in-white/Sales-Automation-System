@@ -119,8 +119,9 @@ def autonomous_reply(plan, catalog, saved, raw, advert=None):
         return 'Дякую, що повідомили. Надішліть квитанцію та номер замовлення або ТТН, будь ласка — потрібно зіставити переказ із вашим замовленням. Повторно платити не потрібно.'
     if saved.get('parcel',{}).get('ttn') and re.search(r'змін|замін|додай|добав|прибери|убери|новий\s+телефон',text):
         return 'Зміну записав. Для цього замовлення вже підготовлено накладну, тому потрібно звірити її перед оновленням. Поточні дані відправлення поки діють. Повторно оплачувати не потрібно.'
-    if 'photos' in flags:
-        return 'Доступні фото є в оголошенні. Яку деталь хочете роздивитися або уточнити? Підкажу за наявними характеристиками.'
+    if 'photos' in flags and not flags.intersection({'sizing','measurements'}):
+        from advert_knowledge import PHOTOS_NOTICE
+        return PHOTOS_NOTICE
     if 'іншої марки' in body or 'іншої речі' in body:
         names = ', '.join(p['name'] for p in list(catalog.products.values())[:6])
         return 'Зараз у каталозі є %s. Про який із цих товарів розповісти?' % names

@@ -1,5 +1,7 @@
 """Payment instructions and shipping details. Receipt verification stays with the owner."""
 
+from size_fulfillment import allocate as allocate_stock
+
 import copy
 import hashlib
 import json
@@ -14,10 +16,10 @@ from inventory import StockUnavailable, stock_signature, stock_rows
 from shop_facts import stock_groups, shipping_reply, shop_day, money, total_price, measurements_reply, FULL_PREPAYMENT_REFUND, COD_DEPOSIT_REFUND, COD_WITHOUT_PREPAYMENT
 from order_summary import snapshot, summary, confirmation_key, order_items, invoice_key, restore_legacy_invoice, new_order_number
 from carrier_payment import enabled as carrier_enabled, direct_delivery
-from customer_language import requested_sizes, requested_quantity, requested_color, reports_payment
+from customer_language import intents, requested_sizes, requested_quantity, requested_color, reports_payment
 from checkout_changes import quantity_change
 from size_advice import asks_size_advice, height_advice, preferred_available_size
-from customer_contact import contact_details, confirms, close_word
+from customer_contact import contact_details, confirms, close_word, waiting_acknowledgment
 from customer_phrasing import canonical, cod_mentioned, cod_deposit_question
 
 DETAILS = "ПІБ отримувача:\nНомер телефону:\nМісто або село, область:\nВідділення або поштомат НП, номер:"
@@ -46,8 +48,8 @@ def missing_details_prompt(details):
         return {"name": "Решту даних зберіг. Підкажіть лише ПІБ отримувача, будь ласка.",
                 "phone": "Решту даних зберіг. Напишіть лише повний номер телефону: 10 цифр, починаючи з 0, або у форматі +380…",
                 "place": "Решту даних зберіг. Уточніть лише населений пункт і область; для села — також район.",
-                "branch": "Решту даних зберіг. Підкажіть лише тип і номер НП — наприклад, «69 відділення» або «поштомат №12345»."}[field]
-    return "Надішліть, будь ласка, решту даних одним повідомленням — можна скопіювати й заповнити:\n" + "\n".join(missing)
+                "branch": "Решту даних зберіг. Підкажіть номер відділення або поштомата — наприклад, «НП №1»."}[field]
+    return "Для відправки ще потрібні:\n" + "\n".join(missing)
 
 
 def valid_iban(value):
@@ -84,7 +86,25 @@ def payment_signature(data):
     return hashlib.sha256(json.dumps({k:v for k,v in data.items() if k != '_monobank'}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def method_choice(text):
+def asks_payment_method(text):
+    """A question about terms does not itself approve a transfer."""
+    text = canonical(text)
+    return bool('?' in text or re.search(
+        r'\b(?:можна|можливо|можно|нельзя|чи|як|как|чому|почему|навіщо|скільки|сколько|'
+        r'якщо|если|відправ(?:ляєте|ите|лятимете)|отправ(?:ляете|ите))\b', text))
+
+
+def method_terms(catalog, method):
+    if method == 'cod':
+        if carrier_enabled(catalog.shop):
+            return 'Так, можна післяплатою. Доставку оплачуєте Новій пошті за ТТН, а товар — при отриманні.'
+        return 'Так, можна післяплатою. Передоплата — 100 грн. Решту за товар і доставку оплачуєте при отриманні.'
+    if method == 'full':
+        return 'Можна оплатити товар повністю за реквізитами. При отриманні залишиться оплатити доставку.'
+    return 'Так, відправляємо OLX Доставкою. Оформлення й оплата — у самому OLX.'
+
+
+def method_choice(text, pending=None):
     text = canonical(text)
     words = {'one':'1','first':'1','перший':'1','першим':'1','першу':'1','первый':'1','первым':'1','один':'1',
              'two':'2','second':'2','другий':'2','другим':'2','другу':'2','второй':'2','вторым':'2','два':'2','дві':'2',
@@ -96,8 +116,12 @@ def method_choice(text):
     number = re.fullmatch(r"(?:(?:варіант|вариант|спосіб|способ|номер)\s*)?([123])(?:\s*(?:варіант|вариант|спосіб|способ))?[.!]?", text)
     if number:
         return {"1": "olx", "2": "cod", "3": "full"}[number[1]]
-    olx = bool(re.search(r"(?:олх|олікс|olx)", text))
-    cod = cod_mentioned(text) or bool(re.search(r"(?:передоплат|передплат).{0,15}100|100\s*(?:грн|грив)", text))
+    olx = bool(re.search(r"\b(?:олх|олікс|olx)\b", text))
+    cod = cod_mentioned(text) or bool(re.search(
+        r"(?:передоплат|передплат|предоплат)\w*\s*(?:у\s+розмірі\s*|[:—-]\s*)?100\b|"
+        r"\b100\s*(?:грн|грив\w*)?\s*(?:передоплат|передплат|предоплат)", text))
+    if not cod and pending == 'cod' and re.fullmatch(r'100(?:\s*(?:грн|гривень))?[.! ]*', text):
+        cod = True
     if not cod:
         forms = ("післяплата", "післяплатою", "післяплатой", "послеплата", "послеплатой", "наложкою", "наложкой")
         for match in re.finditer(r"[а-яіїєґё]{7,16}", text):
@@ -106,12 +130,41 @@ def method_choice(text):
                 cod = True
                 break
     full = bool(re.search(r"повн\w*\s+(?:передоплат|передплат|оплат)|полн\w*\s+(?:предоплат|оплат)|всю\s+сум|вся\s+сум|одразу\s+вс[ею]", text))
-    if re.search(r"не\s+(?:через\s+)?(?:олх|olx)", text):
+    if re.search(r"не\s+(?:(?:хочу|треба|потрібно|буду|через)\s+)*(?:олх|olx)|(?:олх|olx)\s+(?:не\s+треба|не\s+підходить)", text):
         olx = False
     if re.search(r"не\s+(?:хочу\s+)?(?:налож|післяплат|накладен|накладн)", text):
         cod = False
+    if re.search(r'не\s+(?:(?:хочу|треба|потрібно|буду)\s+)*п[оа]вн\w*\s+(?:передоплат|оплат)|не\s+полн\w*\s+(?:предоплат|оплат)', text):
+        full = False
     methods = [name for name, found in (("olx", olx), ("cod", cod), ("full", full)) if found]
-    return methods[0] if len(methods) == 1 else "ambiguous" if methods else None
+    if methods:
+        return methods[0] if len(methods) == 1 else "ambiguous"
+    # A generic "передоплатою" accepts the specifically proposed method; it
+    # never independently means full payment or a 100 UAH deposit.
+    if pending in ('cod', 'full', 'olx') and text.strip(' ,.!') and not asks_payment_method(text):
+        acceptance = re.sub(r'\b(?:передоплат\w*|передплат\w*|предоплат\w*|давай(?:те)?|цим|таким|цей|такой|способом|спосіб|варіант|варіантом|тоді|тогда)\b', ' ', text)
+        acceptance = re.sub(r'\s+', ' ', acceptance).strip(' ,.!')
+        explicit = bool(re.search(r'\b(?:передоплат\w*|передплат\w*|предоплат\w*|давай(?:те)?)\b', text))
+        if (not acceptance and explicit) or confirms(acceptance) or acceptance in ('згоден', 'згодна', 'согласен', 'согласна'):
+            return pending
+    return None
+
+
+def method_with_side_question(raw):
+    """An explicit method can be followed by a separate, informational question."""
+    parts = re.split(r'[,\n]+|(?<=[.!])\s+', raw, maxsplit=1)
+    if len(parts) != 2 or asks_payment_method(parts[0]) or not asks_payment_method(parts[1]):
+        return None
+    first, followup = map(canonical, parts)
+    if not re.fullmatch(r'(?:(?:давай(?:те)?|обираю|вибираю|краще|лучше)\s+)?(?:налож\w*|післяплат\w*|послеплат\w*|наклад\w*(?:\s+(?:платеж\w*|платежом))?|повн\w*\s+(?:перед)?оплат\w*|(?:олх|олікс|olx)(?:\s+доставк\w*)?)[.! ]*', first):
+        return None
+    flags = intents(followup)
+    from customer_advice import FACT_TOPICS
+    if (flags.intersection(FACT_TOPICS | {'dispatch', 'measurements'}) and
+            not flags.intersection({'payment', 'arrival', 'cancel', 'complaint', 'price', 'order', 'returns'}) and
+            ('delivery' not in flags or 'dispatch' in flags) and not re.search(r'\b(?:без|якщо|если)\b', followup)):
+        return method_choice(first)
+    return None
 
 
 def shipping_details(raw, saved, awaiting=None):
@@ -261,6 +314,11 @@ class Checkout:
             return reply("Добре, оформлення скасовано. Якщо захочете повернутися до вибору — пишіть.")
         if saved.get("checkout_stage") == "details":
             context = restore_legacy_invoice(self.catalog, context)
+            acknowledgment = (confirms(raw) and any(not saved.get('shipping_details', {}).get(key) for key in LABELS) and
+                              saved.get('awaiting') != 'attachment_purpose' and not saved.get('quantity_change'))
+            if not has_attachments and (waiting_acknowledgment(raw) or acknowledgment):
+                context['shipping_details'] = shipping_details('', saved.get('shipping_details', {}))
+                return reply('Добре, я на зв’язку')
             change = quantity_change(self.catalog, self.inventory, text, context, has_attachments)
             if change is not None:
                 body, human, changes_guard = change
@@ -273,7 +331,7 @@ class Checkout:
                         context = copy.deepcopy(saved)
                         return reply("Перед зміною суми звіримо актуальні реквізити саме для цього замовлення. Поки нічого не переказуйте.", True)
                     guard["payment_settings"] = payment_signature(self.merchant)
-                if not human and not context.get("quantity_change"):
+                if not human and not context.get("quantity_change") and context.get('invoice_items') != saved.get('invoice_items'):
                     details = context.get("shipping_details", {})
                     if any(not details.get(key) for key in LABELS):
                         body += "\n\n" + missing_details_prompt(details)
@@ -366,8 +424,9 @@ class Checkout:
                 context.pop("unclassified_attachment", None)
                 sent["awaiting"] = "shipping_details"
                 return reply("Зрозуміло, це фото не позначаю як квитанцію.\n\n" + missing_details_prompt(context.get("shipping_details", {})))
+            bulk_request = bool(re.search(r"разом|вместе|ус[еі]\s+дан|вс[еіёьо]+\s+(?:разом|сразу)|одним\s+повідом", text))
             if saved.get("awaiting") == "attachment_purpose":
-                if not purpose_reply and not receipt_attachment:
+                if not purpose_reply and not receipt_attachment and not bulk_request:
                     details = shipping_details(raw, saved.get("shipping_details", {}), saved.get("shipping_awaiting"))
                     if details == saved.get("shipping_details", {}):
                         sent["awaiting"] = "attachment_purpose"
@@ -390,14 +449,10 @@ class Checkout:
                 return reply("Так, можна надіслати фото або скріншот квитанції сюди 😊")
             if missing:
                 context["shipping_awaiting"] = next(key for key in LABELS if not details.get(key))
-                bulk_request = bool(re.search(r"разом|вместе|ус[еі]\s+дан|вс[еіёьо]+\s+(?:разом|сразу)|одним\s+повідом", text))
                 attempts = 0 if details != saved.get("shipping_details", {}) or bulk_request or purpose_reply else saved.get("shipping_attempts", 0) + (0 if has_attachments else 1)
                 context["shipping_attempts"] = attempts
-                if attempts>=4:
-                    return reply('Можемо повернутися до оформлення, коли буде зручно. Надішліть решту даних — продовжимо з цього місця.')
-                if attempts >= 2:
-                    from conversation_policy import next_step
-                    return reply(next_step(self.catalog,context))
+                if re.search(r'вже\s+(?:сказав|казав|писав|написав|надсилав)|уже\s+(?:сказал|писал|отправлял)', text):
+                    return reply('Перепрошую, бачу вже надані дані. ' + missing_details_prompt(details))
                 intro = "Дякую, вкладення для перевірки оплати отримав.\n\n" if receipt_attachment or purpose_reply else ""
                 return reply(intro + missing_details_prompt(details))
             context.pop("shipping_awaiting", None)
@@ -454,18 +509,25 @@ class Checkout:
                 sent['awaiting'] = 'payment_receipt'
             sent["dispatch_announced_key"] = invoice_key(snapshot(self.catalog, context))
             return reply("Дякую! " + shipping_reply(self.catalog.shop, self.now() if self.now else None))
+        # A submitted/verified invoice can fall through after a side question.
+        # Its payment menu must never issue another invoice for these same goods.
+        if saved.get('invoice_issued'):
+            if method_choice(text) and not has_attachments:
+                order = snapshot(self.catalog, saved)
+                return reply('Замовлення №%s уже записане. Якщо хочете змінити спосіб оплати, напишіть, який саме. Повторно нічого не переказуйте.' % order['id'])
+            return None
         if "arrival" in flags or "dispatch" in flags and re.match(r"(?:коли|когда)\b", text):
             return None
-        choice = method_choice(text)
-        if choice in ("cod", "olx", "full") and re.match(r"(?:як\b|как\b|чим\b|чому\b|почему\b|скільки\b|сколько\b)", text):
+        separate_choice = method_with_side_question(raw)
+        choice = separate_choice or method_choice(text, saved.get('pending_checkout_method'))
+        if (choice in ("cod", "olx", "full") and not has_attachments and asks_payment_method(text) and not separate_choice):
             sent["pending_checkout_method"] = choice
-            explanation = {"cod": "Для післяплати доставку оплачуєте Новій пошті за ТТН, а повну вартість товару — при отриманні." if carrier_enabled(self.catalog.shop) else "Для післяплати передоплата — 100 грн, решта вартості товару при отриманні.",
-                           "olx": "OLX Доставка оформлюється й оплачується в самому OLX.",
-                           "full": "При повній оплаті товар оплачуєте за реквізитами, а при отриманні — лише доставку."}[choice]
-            return reply(explanation + " Бажаєте обрати цей спосіб?")
-        if choice is None and saved.get("pending_checkout_method") and re.fullmatch(r"(?:так|да|добре|ок|давайте)[.! ]*", text):
-            choice = saved["pending_checkout_method"]
+            return reply(method_terms(self.catalog, choice) + " Оформлюємо так?")
+        if has_attachments or reports_payment(text):
+            choice = None
         if choice is None:
+            if re.search(r'\b(?:передоплат\w*|передплат\w*|предоплат\w*)\b', text) and not cod_deposit_question(text, saved):
+                return reply('Уточню лише суму: передоплата 100 грн, а решта при отриманні, чи повна оплата товару?')
             if requests_invoice(text):
                 return reply("Звісно. Реквізити надіслати для передоплати 100 грн із рештою при отриманні чи для повної оплати товару? Також можна оформити OLX Доставку в застосунку.")
             if re.fullmatch(r"(?:так|да|добре|ок|окей|давайте)[.! ]*", text):
@@ -504,6 +566,8 @@ class Checkout:
                     stocks[key], signatures[key] = stock_groups(rows), stock_signature(rows)
                 if stocks[key].get((size, color), 0) < demands[key, size, color]:
                     return reply("Поки оформляли замовлення, наявність змінилася. Уточню варіанти для вас перед оплатою 😊", True)
+            current_selection = {key: value for key, value in saved.items() if key != "invoice_items"}
+            frozen_items = allocate_stock(self.catalog, self.inventory, order_items(self.catalog, current_selection))
         except StockUnavailable:
             return reply("Перед оплатою потрібно ще раз уточнити наявність. Зараз допоможу вам особисто 😊", True)
         guard["stocks"] = signatures
@@ -522,8 +586,8 @@ class Checkout:
                 return reply('Уточню точну ціну вибраних речей перед оформленням.', True)
             current_selection = {key: value for key, value in saved.items() if key != 'invoice_items'}
             sent.update(checkout_stage='details', checkout_amount='0', checkout_delivery_prepay=True,
-                        awaiting='shipping_details', invoice_id=new_order_number(),
-                        invoice_items=order_items(self.catalog, current_selection),
+                        awaiting='shipping_details', invoice_id=saved.get('invoice_id') or new_order_number(),
+                        invoice_items=frozen_items,
                         invoice_total=money(total_price(prices, cart)), invoice_issued=True,
                         customer_confirmation=None, confirmation_sent=None, payment_verified=False,
                         verified_invoice_key=None, shipping_directory_required=bool(self.address_book))
@@ -542,8 +606,8 @@ class Checkout:
         intro = ("Добре, оформимо післяплатою. Передоплата — 100 грн, %s грн за товар — при отриманні." % money(total_price(prices, cart) - amount)
                  if choice == "cod" else "Добре, оформимо з повною оплатою товару. При отриманні сплачуєте лише доставку.")
         current_selection = {key: value for key, value in saved.items() if key != "invoice_items"}
-        sent.update(checkout_stage="details", checkout_amount=money(amount), awaiting="shipping_details", invoice_id=new_order_number(),
-                    invoice_items=order_items(self.catalog, current_selection), invoice_total=money(total_price(prices, cart)), invoice_issued=True,
+        sent.update(checkout_stage="details", checkout_amount=money(amount), awaiting="shipping_details", invoice_id=saved.get('invoice_id') or new_order_number(),
+                    invoice_items=frozen_items, invoice_total=money(total_price(prices, cart)), invoice_issued=True,
                     invoice_payment_signature=payment_signature(self.merchant), customer_confirmation=None, confirmation_sent=None,
                     payment_verified=False, verified_invoice_key=None, confirmation_attempts=0,
                     receipt_required=True, receipt_expected=True)

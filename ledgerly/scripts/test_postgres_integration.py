@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
+from types import SimpleNamespace
+from unittest.mock import patch
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
@@ -34,6 +36,54 @@ def _reset_test_schemas() -> None:
             connection.execute(
                 sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
             )
+
+
+def _manual_order_integration(product, variant):
+    import callbacks
+    import order_entry
+    import repliq_inbox
+
+    class Bot:
+        def __init__(self):
+            self.sent = []
+        def send_message(self, chat_id, text, **kwargs):
+            message = SimpleNamespace(message_id=len(self.sent) + 1, text=text,
+                chat=SimpleNamespace(id=chat_id), reply_markup=kwargs.get('reply_markup'))
+            self.sent.append(message)
+            return message
+        def answer_callback_query(self, *args, **kwargs):
+            pass
+        def edit_message_text(self, *args, **kwargs):
+            pass
+
+    bot, user = Bot(), SimpleNamespace(id=1, full_name='Integration owner')
+    def press(action, value='x'):
+        payload = business_db.get_inventory_wizard(1)['payload']
+        call = SimpleNamespace(id='test', from_user=user,
+            message=SimpleNamespace(chat=SimpleNamespace(id=1, type='private'), message_id=1),
+            data='new:%s:%s:%s:%s' % (payload['token'], payload['revision'], action, value))
+        callbacks.handle_callback(bot, call)
+        return call
+    with patch.object(callbacks, 'is_admin', return_value=True), patch.object(callbacks, 'is_employee', return_value=True), \
+         patch.object(repliq_inbox, '_RECEIVER', None), patch('incoming_group_listener.process_manual_ttn', return_value=(True, {}, False, 'ok')):
+        order_entry.start_order(bot, 1, 1)
+        press('kind', 'olx'); press('product', product['id']); press('color', 'BLACK'); press('size', variant['id']); press('qty', '2')
+        for value in ('2100,50', '20451424252957'):
+            order_entry.handle_text(bot, SimpleNamespace(chat=SimpleNamespace(id=1), from_user=user, text=value))
+        assert business_db.get_inventory_wizard(1)['step'] == 'ORDER_REVIEW'
+        token = business_db.get_inventory_wizard(1)['payload']['token']
+        saved_call = press('save')
+        callbacks.handle_callback(bot, saved_call)
+        order = business_db.get_order_by_ttn('20451424252957')
+        assert order['product_id'] == product['id'] and order['quantity'] == 2 and order['sale_price_cents'] == 210050
+        assert business_db.get_inventory_variant(variant['id'])['reserved'] == 2
+        assert business_db.get_submission(token)['status'] == 'CONFIRMED'
+        business_db.mark_order_shipped_by_ttn(order['ttn'], 1)
+        result = business_db.mark_order_in_1c(order['id'], 1)
+        assert result['deducted_quantity'] == 2 and result['purchase_cost_cents'] == 100000
+        assert business_db.mark_order_in_1c(order['id'], 1)['already_recorded']
+        assert business_db.get_inventory_variant(variant['id'])['on_hand'] == 2
+    print('PostgreSQL manual order: buttons, atomic save, reservation, shipping, FIFO and duplicate protection: OK')
 
 
 def main() -> None:
@@ -158,6 +208,7 @@ def main() -> None:
         ).fetchone()
         assert batch and batch[0] == "SEA" and batch[1] == 4
 
+    _manual_order_integration(configured, variant)
     close_pools()
     print("PostgreSQL integration: OK")
     print("Schemas, inventory, sale, refusal, turnover, tracking and views: OK")

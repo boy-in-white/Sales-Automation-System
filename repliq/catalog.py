@@ -76,6 +76,8 @@ class Catalog:
                             raise ValueError()
                     elif not isinstance(value, str) or not 1 <= len(value) <= 400:
                         raise ValueError()
+                if type(p.get("size_substitution_enabled", False)) is not bool:
+                    raise ValueError()
                 excluded = p.get("excluded_sizes", [])
                 if not isinstance(excluded, list) or len(excluded) != len(set(excluded)) or any(size not in SIZES for size in excluded):
                     raise ValueError()
